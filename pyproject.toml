@@ -1,0 +1,11 @@
+[project]
+name = "mediapipe-app"
+version = "0.1.0"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+    "mediapipe==0.10.14",
+    "streamlit>=1.35.0,<1.40.0",
+    "protobuf>=4.25.3,<5.0.0",
+    "numpy<2",
+    "opencv-python<5",
+]
