@@ -1,4 +1,4 @@
-# 時好時壞
+""" 英文版文字，中文說明 """
 import os
 import shutil
 import math
