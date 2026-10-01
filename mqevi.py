@@ -1,7 +1,9 @@
+import os
 import cv2
 import math
 import time
 import subprocess
+import urllib.request
 import numpy as np
 import streamlit as st
 import mediapipe as mp
@@ -12,8 +14,31 @@ import mediapipe as mp
 st.set_page_config(page_title="目檢標準距離檢測系統", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 2. MediaPipe 模型載入與快取
+# 2. 自動預下載並修正 MediaPipe 模型權限 (解決 Streamlit Cloud PermissionError)
 # -----------------------------------------------------------------------------
+def setup_mediapipe_model():
+    """解決 Streamlit Cloud 無法寫入 site-packages 的權限問題"""
+    try:
+        mp_path = os.path.dirname(mp.__file__)
+        target_dir = os.path.join(mp_path, "modules", "pose_landmark")
+        target_file = os.path.join(target_dir, "pose_landmark_lite.tflite")
+        
+        os.makedirs(target_dir, exist_ok=True)
+        
+        try:
+            os.chmod(target_dir, 0o777)
+        except Exception:
+            pass
+            
+        if not os.path.exists(target_file):
+            url = "https://storage.googleapis.com/mediapipe-assets/pose_landmark_lite.tflite"
+            urllib.request.urlretrieve(url, target_file)
+    except Exception as e:
+        print(f"MediaPipe 模型預處理提示: {e}")
+
+# 執行模型權限修復
+setup_mediapipe_model()
+
 mp_pose = mp.solutions.pose
 
 @st.cache_resource
@@ -37,22 +62,21 @@ if "target_reached_spoken" not in st.session_state:
     st.session_state.target_reached_spoken = False
 
 def speak_async(text, cooldown=2.5, force=False):
-    """非同步語音播報 (適用於 macOS)"""
+    """非同步語音播報 (適用於 macOS / Linux)"""
     current_time = time.time()
     
     if force or (current_time - st.session_state.last_speak_time >= cooldown):
         st.session_state.last_speak_time = current_time
         
-        # 強制播報時切斷舊語音
         if force and st.session_state.current_speech_proc is not None:
             if st.session_state.current_speech_proc.poll() is None:
                 st.session_state.current_speech_proc.terminate()
         
         try:
+            # 判斷是否在 macOS 支援 say 指令
             st.session_state.current_speech_proc = subprocess.Popen(['say', text])
             return True
-        except Exception as e:
-            print(f"語音播報失敗: {e}")
+        except Exception:
             return False
     return False
 
@@ -62,7 +86,6 @@ def speak_async(text, cooldown=2.5, force=False):
 st.title("📷 目檢標準距離檢測系統")
 st.caption("標準範圍：30 ~ 32 cm")
 
-# 側邊欄控制區
 st.sidebar.header("⚙️ 系統參數設定")
 
 run_camera = st.sidebar.toggle("開啟攝影機", value=True)
@@ -91,7 +114,7 @@ if run_camera:
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        st.error("無法開啟攝影機，請檢查硬體或權限設定！")
+        st.error("⚠️ 無法開啟攝影機！若已部署至 Streamlit Cloud，雲端伺服器無法使用 OpenCV 讀取使用者本機攝影機。")
     else:
         while cap.isOpened() and run_camera:
             ret, frame = cap.read()
@@ -99,7 +122,6 @@ if run_camera:
                 st.warning("無法取得攝影機畫面。")
                 break
 
-            # 畫面鏡像與 RGB 轉換
             frame = cv2.flip(frame, 1)
             h, w, _ = frame.shape
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -112,19 +134,16 @@ if run_camera:
             if results.pose_landmarks:
                 landmarks = results.pose_landmarks.landmark
 
-                # A. 兩眼中心點 (Point A)
                 left_eye = landmarks[mp_pose.PoseLandmark.LEFT_EYE.value]
                 right_eye = landmarks[mp_pose.PoseLandmark.RIGHT_EYE.value]
                 eye_mid_x = int((left_eye.x + right_eye.x) / 2 * w)
                 eye_mid_y = int((left_eye.y + right_eye.y) / 2 * h)
 
-                # B. 雙手大拇指指尖中心點 (Point B)
                 left_thumb = landmarks[mp_pose.PoseLandmark.LEFT_THUMB.value]
                 right_thumb = landmarks[mp_pose.PoseLandmark.RIGHT_THUMB.value]
                 thumb_mid_x = int((left_thumb.x + right_thumb.x) / 2 * w)
                 thumb_mid_y = int((left_thumb.y + right_thumb.y) / 2 * h)
 
-                # C. 計算距離
                 raw_dist_cm = 0.0
 
                 if use_3d_world and results.pose_world_landmarks:
@@ -147,7 +166,6 @@ if run_camera:
 
                 current_dist_cm = raw_dist_cm * calib_ratio
 
-                # 判斷距離邏輯與語音控制
                 if MIN_TARGET_CM <= current_dist_cm <= MAX_TARGET_CM:
                     status_str = "PASS (合格)"
                     line_color = (0, 255, 0)
@@ -169,7 +187,6 @@ if run_camera:
                     st.session_state.target_reached_spoken = False
                     speak_async(f"太遠，請靠近{diff_cm:.1f}公分", cooldown=2.5)
 
-                # 繪製 Overlay 視覺特徵
                 cv2.circle(frame, (eye_mid_x, eye_mid_y), 8, (0, 255, 255), -1)
                 cv2.circle(frame, (thumb_mid_x, thumb_mid_y), 8, (255, 255, 0), -1)
                 cv2.line(frame, (eye_mid_x, eye_mid_y), (thumb_mid_x, thumb_mid_y), line_color, 3)
@@ -179,12 +196,15 @@ if run_camera:
                 cv2.putText(frame, "B (Thumb Mid)", (thumb_mid_x - 50, thumb_mid_y + 25),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
-            # 更新 Streamlit 右側數據面板
             status_metric.metric("檢測狀態", status_str)
             dist_metric.metric("當前測量距離", f"{current_dist_cm:.1f} cm")
 
-            # 畫面渲染
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image_container.image(frame_rgb, channels="RGB", width=1000)
+            try:
+                image_container.image(frame_rgb, channels="RGB", use_container_width=True)
+            except Exception:
+                image_container.image(frame_rgb, channels="RGB")
+
+            time.sleep(0.01)
 
         cap.release()

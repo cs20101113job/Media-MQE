@@ -1,4 +1,5 @@
 import os
+import shutil
 import math
 import time
 import urllib.request
@@ -9,39 +10,63 @@ import mediapipe as mp
 import av
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
 
+from mediapipe.python._framework_bindings import resource_util
+from mediapipe.python.solutions import download_utils
+
 # -----------------------------------------------------------------------------
 # 1. 頁面配置 (必須是第一個 Streamlit 指令)
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="目檢標準距離檢測系統 (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 2. 自動預下載並修正 MediaPipe 模型權限 (解決 Streamlit Cloud 權限錯誤)
+# 2. 解決 Streamlit Cloud site-packages 唯讀權限問題 (影子目錄重定向)
 # -----------------------------------------------------------------------------
-def setup_mediapipe_model():
-    try:
-        mp_path = os.path.dirname(mp.__file__)
-        target_dir = os.path.join(mp_path, "modules", "pose_landmark")
-        target_file = os.path.join(target_dir, "pose_landmark_lite.tflite")
-        
-        os.makedirs(target_dir, exist_ok=True)
-        try:
-            os.chmod(target_dir, 0o777)
-        except Exception:
-            pass
-            
-        if not os.path.exists(target_file):
-            url = "https://storage.googleapis.com/mediapipe-assets/pose_landmark_lite.tflite"
-            urllib.request.urlretrieve(url, target_file)
-    except Exception as e:
-        print(f"MediaPipe 模型預處理提示: {e}")
+def setup_mediapipe_cloud():
+    """
+    將 MediaPipe 資源重定向至可寫入的 /tmp 目錄，徹底解決 PermissionError [Errno 13]
+    """
+    mp_path = os.path.dirname(mp.__file__)
+    tmp_root = "/tmp/mediapipe_root"
+    tmp_mp_dir = os.path.join(tmp_root, "mediapipe")
+    target_file = os.path.join(tmp_mp_dir, "modules", "pose_landmark", "pose_landmark_lite.tflite")
 
-setup_mediapipe_model()
+    if not os.path.exists(target_file):
+        # 複製/軟連結 site-packages/mediapipe 的目錄結構至 /tmp/mediapipe_root/mediapipe
+        for root, dirs, files in os.walk(mp_path):
+            rel_path = os.path.relpath(root, mp_path)
+            dest_dir = os.path.join(tmp_mp_dir, rel_path) if rel_path != "." else tmp_mp_dir
+            os.makedirs(dest_dir, exist_ok=True)
+            for file in files:
+                src_file = os.path.join(root, file)
+                dst_file = os.path.join(dest_dir, file)
+                if not os.path.exists(dst_file):
+                    try:
+                        os.symlink(src_file, dst_file)
+                    except Exception:
+                        shutil.copy2(src_file, dst_file)
+
+        # 下載模型檔案至 /tmp 可寫入目錄
+        url = "https://storage.googleapis.com/mediapipe-assets/pose_landmark_lite.tflite"
+        urllib.request.urlretrieve(url, target_file)
+
+    # 重定向 MediaPipe C++ 引擎的資源尋找目錄
+    resource_util.set_resource_dir(tmp_root)
+
+    # Monkey-patch 關閉原本的 download_oss_model 避免觸發 site-packages 寫入
+    download_utils.download_oss_model = lambda path: None
+
+# 執行修復
+setup_mediapipe_cloud()
 
 mp_pose = mp.solutions.pose
 
-# 設定 STUN 伺服器 (確保雲端部署時能夠穿透 NAT 建立 WebRTC 連線)
+# 設定 STUN 伺服器
 RTC_CONFIG = RTCConfiguration({
-    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]}
+    ]
 })
 
 # -----------------------------------------------------------------------------
@@ -49,7 +74,7 @@ RTC_CONFIG = RTCConfiguration({
 # -----------------------------------------------------------------------------
 class PoseVideoProcessor(VideoProcessorBase):
     def __init__(self):
-        # 在獨立線程中初始化 MediaPipe Pose 模型
+        # 此時 MediaPipe 已會自動從 /tmp 載入模型，不會再觸發 PermissionError
         self.pose = mp_pose.Pose(
             static_image_mode=False,
             model_complexity=0,
@@ -57,21 +82,18 @@ class PoseVideoProcessor(VideoProcessorBase):
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
-        # 動態控制參數 (可由 UI 傳入更新)
         self.use_3d_world = True
         self.calib_ratio = 0.85
         self.scale_factor = 0.15
         self.min_target_cm = 30.0
         self.max_target_cm = 32.0
 
-        # 當前狀態紀錄
         self.current_dist_cm = 0.0
         self.status_str = "未偵測到人體標記"
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        # 將輸入的 WebRTC 畫面轉換為 OpenCV 格式 (BGR)
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1)  # 水平鏡像
+        img = cv2.flip(img, 1)
         h, w, _ = img.shape
         
         rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -84,19 +106,16 @@ class PoseVideoProcessor(VideoProcessorBase):
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
 
-            # A. 兩眼中心點
             left_eye = landmarks[mp_pose.PoseLandmark.LEFT_EYE.value]
             right_eye = landmarks[mp_pose.PoseLandmark.RIGHT_EYE.value]
             eye_mid_x = int((left_eye.x + right_eye.x) / 2 * w)
             eye_mid_y = int((left_eye.y + right_eye.y) / 2 * h)
 
-            # B. 雙手大拇指指尖中心點
             left_thumb = landmarks[mp_pose.PoseLandmark.LEFT_THUMB.value]
             right_thumb = landmarks[mp_pose.PoseLandmark.RIGHT_THUMB.value]
             thumb_mid_x = int((left_thumb.x + right_thumb.x) / 2 * w)
             thumb_mid_y = int((left_thumb.y + right_thumb.y) / 2 * h)
 
-            # C. 距離計算
             raw_dist_cm = 0.0
 
             if self.use_3d_world and results.pose_world_landmarks:
@@ -119,7 +138,6 @@ class PoseVideoProcessor(VideoProcessorBase):
 
             current_dist_cm = raw_dist_cm * self.calib_ratio
 
-            # 判斷標準距離
             if self.min_target_cm <= current_dist_cm <= self.max_target_cm:
                 status_str = "PASS (合格)"
                 line_color = (0, 255, 0)
@@ -132,7 +150,6 @@ class PoseVideoProcessor(VideoProcessorBase):
                 status_str = f"TOO FAR (請靠近 {diff_cm:.1f} cm)"
                 line_color = (0, 0, 255)
 
-            # 繪製視覺化特徵標記
             cv2.circle(img, (eye_mid_x, eye_mid_y), 8, (0, 255, 255), -1)
             cv2.circle(img, (thumb_mid_x, thumb_mid_y), 8, (255, 255, 0), -1)
             cv2.line(img, (eye_mid_x, eye_mid_y), (thumb_mid_x, thumb_mid_y), line_color, 3)
@@ -142,14 +159,12 @@ class PoseVideoProcessor(VideoProcessorBase):
             cv2.putText(img, "B (Thumb Mid)", (thumb_mid_x - 50, thumb_mid_y + 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
-            # 將即時結果直接繪製在畫面上，提升即時感
             cv2.putText(img, f"Dist: {current_dist_cm:.1f} cm | {status_str}", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, line_color, 2)
 
         self.current_dist_cm = current_dist_cm
         self.status_str = status_str
 
-        # 將處理後的影像幀轉回 WebRTC 輸出格式
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # -----------------------------------------------------------------------------
@@ -158,7 +173,6 @@ class PoseVideoProcessor(VideoProcessorBase):
 st.title("📷 目檢標準距離檢測系統 (WebRTC 版)")
 st.caption("標準範圍：30 ~ 32 cm")
 
-# 側邊欄控制項
 st.sidebar.header("⚙️ 系統參數設定")
 
 use_3d_world = st.sidebar.toggle("啟用 3D 空間真實距離模式", value=True)
@@ -171,7 +185,6 @@ if st.sidebar.button("重置校正倍率為 1.0"):
 col1, col2 = st.columns([3, 1])
 
 with col1:
-    # 建立 WebRTC 串流組件
     ctx = webrtc_streamer(
         key="pose-distance-detector",
         mode=WebRtcMode.SENDRECV,
@@ -181,7 +194,6 @@ with col1:
         async_processing=True,
     )
 
-# 即時將 Streamlit 控制項變數同步至 WebRTC 處理線程
 if ctx.video_processor:
     ctx.video_processor.use_3d_world = use_3d_world
     ctx.video_processor.calib_ratio = calib_ratio
