@@ -1,11 +1,11 @@
 import os
 import shutil
 import math
-import time
 import urllib.request
 import cv2
 import numpy as np
 import streamlit as st
+import streamlit.components.v1 as components
 import mediapipe as mp
 import av
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
@@ -14,24 +14,20 @@ from mediapipe.python._framework_bindings import resource_util
 from mediapipe.python.solutions import download_utils
 
 # -----------------------------------------------------------------------------
-# 1. 頁面配置 (必須是第一個 Streamlit 指令)
+# 1. 頁面配置
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="目檢標準距離檢測系統 (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 2. 解決 Streamlit Cloud site-packages 唯讀權限問題 (影子目錄重定向)
+# 2. 解決 Streamlit Cloud site-packages 唯讀權限問題
 # -----------------------------------------------------------------------------
 def setup_mediapipe_cloud():
-    """
-    將 MediaPipe 資源重定向至可寫入的 /tmp 目錄，徹底解決 PermissionError [Errno 13]
-    """
     mp_path = os.path.dirname(mp.__file__)
     tmp_root = "/tmp/mediapipe_root"
     tmp_mp_dir = os.path.join(tmp_root, "mediapipe")
     target_file = os.path.join(tmp_mp_dir, "modules", "pose_landmark", "pose_landmark_lite.tflite")
 
     if not os.path.exists(target_file):
-        # 複製/軟連結 site-packages/mediapipe 的目錄結構至 /tmp/mediapipe_root/mediapipe
         for root, dirs, files in os.walk(mp_path):
             rel_path = os.path.relpath(root, mp_path)
             dest_dir = os.path.join(tmp_mp_dir, rel_path) if rel_path != "." else tmp_mp_dir
@@ -45,22 +41,16 @@ def setup_mediapipe_cloud():
                     except Exception:
                         shutil.copy2(src_file, dst_file)
 
-        # 下載模型檔案至 /tmp 可寫入目錄
         url = "https://storage.googleapis.com/mediapipe-assets/pose_landmark_lite.tflite"
         urllib.request.urlretrieve(url, target_file)
 
-    # 重定向 MediaPipe C++ 引擎的資源尋找目錄
     resource_util.set_resource_dir(tmp_root)
-
-    # Monkey-patch 關閉原本的 download_oss_model 避免觸發 site-packages 寫入
     download_utils.download_oss_model = lambda path: None
 
-# 執行修復
 setup_mediapipe_cloud()
 
 mp_pose = mp.solutions.pose
 
-# 設定 STUN 伺服器
 RTC_CONFIG = RTCConfiguration({
     "iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
@@ -70,11 +60,10 @@ RTC_CONFIG = RTCConfiguration({
 })
 
 # -----------------------------------------------------------------------------
-# 3. WebRTC 影像處理類別 (VideoProcessorBase)
+# 3. WebRTC 影像處理類別 (改用英文繪製 OpenCV 文字以防止問號)
 # -----------------------------------------------------------------------------
 class PoseVideoProcessor(VideoProcessorBase):
     def __init__(self):
-        # 此時 MediaPipe 已會自動從 /tmp 載入模型，不會再觸發 PermissionError
         self.pose = mp_pose.Pose(
             static_image_mode=False,
             model_complexity=0,
@@ -90,6 +79,7 @@ class PoseVideoProcessor(VideoProcessorBase):
 
         self.current_dist_cm = 0.0
         self.status_str = "未偵測到人體標記"
+        self.speech_text = ""
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
@@ -100,8 +90,10 @@ class PoseVideoProcessor(VideoProcessorBase):
         results = self.pose.process(rgb_frame)
 
         status_str = "未偵測到人體標記"
+        status_en = "NO TARGET"
         line_color = (200, 200, 200)
         current_dist_cm = 0.0
+        speech_text = ""
 
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
@@ -140,47 +132,53 @@ class PoseVideoProcessor(VideoProcessorBase):
 
             if self.min_target_cm <= current_dist_cm <= self.max_target_cm:
                 status_str = "PASS (合格)"
+                status_en = "PASS"
                 line_color = (0, 255, 0)
+                speech_text = "距離合格"
             elif current_dist_cm < self.min_target_cm:
                 diff_cm = self.min_target_cm - current_dist_cm
                 status_str = f"TOO CLOSE (請拉遠 {diff_cm:.1f} cm)"
+                status_en = f"TOO CLOSE (Back {diff_cm:.1f} cm)"
                 line_color = (0, 0, 255)
+                speech_text = f"太近了，請拉遠 {diff_cm:.1f} 公分"
             else:
                 diff_cm = current_dist_cm - self.max_target_cm
                 status_str = f"TOO FAR (請靠近 {diff_cm:.1f} cm)"
+                status_en = f"TOO FAR (Closer {diff_cm:.1f} cm)"
                 line_color = (0, 0, 255)
+                speech_text = f"太遠了，請靠近 {diff_cm:.1f} 公分"
 
             cv2.circle(img, (eye_mid_x, eye_mid_y), 8, (0, 255, 255), -1)
             cv2.circle(img, (thumb_mid_x, thumb_mid_y), 8, (255, 255, 0), -1)
             cv2.line(img, (eye_mid_x, eye_mid_y), (thumb_mid_x, thumb_mid_y), line_color, 3)
 
-            cv2.putText(img, "A (Eye Mid)", (eye_mid_x - 50, eye_mid_y - 15),
+            cv2.putText(img, "Eye", (eye_mid_x - 30, eye_mid_y - 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            cv2.putText(img, "B (Thumb Mid)", (thumb_mid_x - 50, thumb_mid_y + 25),
+            cv2.putText(img, "Thumb", (thumb_mid_x - 30, thumb_mid_y + 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
-            cv2.putText(img, f"Dist: {current_dist_cm:.1f} cm | {status_str}", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, line_color, 2)
+            # 使用純英文繪製，徹底解決中文字出現問號的問題
+            cv2.putText(img, f"Dist: {current_dist_cm:.1f} cm | {status_en}", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, line_color, 2)
 
         self.current_dist_cm = current_dist_cm
         self.status_str = status_str
+        self.speech_text = speech_text
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # -----------------------------------------------------------------------------
-# 4. Streamlit UI 介面設定
+# 4. Streamlit UI 與前端語音播報 (Web Speech API)
 # -----------------------------------------------------------------------------
 st.title("📷 目檢標準距離檢測系統 (WebRTC 版)")
 st.caption("標準範圍：30 ~ 32 cm")
 
 st.sidebar.header("⚙️ 系統參數設定")
 
+enable_audio = st.sidebar.checkbox("開啟中文語音提示", value=True)
 use_3d_world = st.sidebar.toggle("啟用 3D 空間真實距離模式", value=True)
 calib_ratio = st.sidebar.slider("距離校正倍率 (Calib Ratio)", min_value=0.1, max_value=2.0, value=0.85, step=0.01)
 scale_factor = st.sidebar.slider("2D 像素轉公分比例 (Scale Factor)", min_value=0.01, max_value=0.50, value=0.15, step=0.005)
-
-if st.sidebar.button("重置校正倍率為 1.0"):
-    calib_ratio = 1.0
 
 col1, col2 = st.columns([3, 1])
 
@@ -206,6 +204,24 @@ with col2:
     if ctx.video_processor:
         status_metric.metric("檢測狀態", ctx.video_processor.status_str)
         dist_metric.metric("當前測量距離", f"{ctx.video_processor.current_dist_cm:.1f} cm")
+
+        # 瀏覽器語音播報機制
+        if enable_audio and ctx.video_processor.speech_text:
+            text_to_speak = ctx.video_processor.speech_text
+            
+            # 利用 JavaScript 觸發瀏覽器 TTS 發音
+            js_code = f"""
+            <script>
+            if ('speechSynthesis' in window) {{
+                window.speechSynthesis.cancel(); // 停止上一句，確保即時播報
+                var msg = new SpeechSynthesisUtterance("{text_to_speak}");
+                msg.lang = 'zh-TW';
+                msg.rate = 1.0;
+                window.speechSynthesis.speak(msg);
+            }}
+            </script>
+            """
+            components.html(js_code, height=0, width=0)
     else:
         status_metric.metric("檢測狀態", "請點擊 START 開啟攝影機")
         dist_metric.metric("當前測量距離", "0.0 cm")
