@@ -21,38 +21,27 @@ from mediapipe.python.solutions import download_utils
 st.set_page_config(page_title="Visual Inspection Distance (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 2. 修復 MediaPipe Cloud 唯讀權限問題 & 模型的快取與預熱 (Warm-up)
+# 2. 修復 MediaPipe Cloud 缺少模型檔問題 & 模型的快取與預熱 (Warm-up)
 # -----------------------------------------------------------------------------
 def setup_mediapipe_cloud():
+    """修復 Streamlit Cloud 缺失 MediaPipe tflite 模型檔的問題"""
     mp_path = os.path.dirname(mp.__file__)
-    tmp_root = "/tmp/mediapipe_root"
-    tmp_mp_dir = os.path.join(tmp_root, "mediapipe")
-    target_file = os.path.join(tmp_mp_dir, "modules", "pose_landmark", "pose_landmark_lite.tflite")
+    target_dir = os.path.join(mp_path, "modules", "pose_landmark")
+    target_file = os.path.join(target_dir, "pose_landmark_lite.tflite")
 
+    # 若 site-packages 內缺少 pose_landmark_lite.tflite，直接補下載進去
     if not os.path.exists(target_file):
-        for root, dirs, files in os.walk(mp_path):
-            rel_path = os.path.relpath(root, mp_path)
-            dest_dir = os.path.join(tmp_mp_dir, rel_path) if rel_path != "." else tmp_mp_dir
-            os.makedirs(dest_dir, exist_ok=True)
-            for file in files:
-                src_file = os.path.join(root, file)
-                dst_file = os.path.join(dest_dir, file)
-                if not os.path.exists(dst_file):
-                    try:
-                        os.symlink(src_file, dst_file)
-                    except Exception:
-                        shutil.copy2(src_file, dst_file)
-
+        os.makedirs(target_dir, exist_ok=True)
         url = "https://storage.googleapis.com/mediapipe-assets/pose_landmark_lite.tflite"
-        urllib.request.urlretrieve(url, target_file)
-
-    resource_util.set_resource_dir(tmp_root)
-    download_utils.download_oss_model = lambda path: None
+        try:
+            urllib.request.urlretrieve(url, target_file)
+        except Exception as e:
+            st.error(f"Failed to download MediaPipe model file: {e}")
 
 setup_mediapipe_cloud()
 mp_pose = mp.solutions.pose
 
-# 【修復首次卡頓】使用 st.cache_resource 快取模型並進行暖機 (Warm-up)
+# 【修復首次畫面凍結】使用 st.cache_resource 快取模型並進行暖機 (Warm-up)
 @st.cache_resource
 def get_mp_pose_model():
     pose = mp_pose.Pose(
