@@ -1,7 +1,6 @@
 import os
 import shutil
 import math
-import time
 import urllib.request
 import cv2
 import numpy as np
@@ -51,35 +50,28 @@ def setup_mediapipe_cloud():
 setup_mediapipe_cloud()
 mp_pose = mp.solutions.pose
 
+# -----------------------------------------------------------------------------
+# 強化版 WebRTC RTCConfiguration (包含多組 STUN 與公共 TURN 轉發伺服器)
+# -----------------------------------------------------------------------------
 RTC_CONFIG = RTCConfiguration({
     "iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
         {"urls": ["stun:stun1.l.google.com:19302"]},
         {"urls": ["stun:stun2.l.google.com:19302"]},
-        {"urls": ["stun:stun3.l.google.com:19302"]},
-        {"urls": ["stun:global.stun.twilio.com:3478"]}
+        {"urls": ["stun:global.stun.twilio.com:3478"]},
+        # 使用免費公共 TURN 伺服器穿透嚴格防火牆/NAT
+        {
+            "urls": ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"],
+            "username": "openrelayproject",
+            "credential": "openrelayproject"
+        },
+        {
+            "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
+            "username": "openrelayproject",
+            "credential": "openrelayproject"
+        }
     ]
 })
-
-# -----------------------------------------------------------------------------
-# 語音發送 Helper
-# -----------------------------------------------------------------------------
-def speak_js(text: str):
-    """呼叫瀏覽器原生 Web Speech API 朗讀中文"""
-    if text and text not in ["未偵測到人體", "請開啟攝影機"]:
-        safe_text = text.replace("'", "\\'")
-        js_code = f"""
-        <script>
-            if ('speechSynthesis' in window) {{
-                window.speechSynthesis.cancel();
-                var msg = new SpeechSynthesisUtterance('{safe_text}');
-                msg.lang = 'zh-TW';
-                msg.rate = 1.0;
-                window.speechSynthesis.speak(msg);
-            }}
-        </script>
-        """
-        components.html(js_code, height=0, width=0)
 
 # -----------------------------------------------------------------------------
 # 3. WebRTC 影像處理類別
@@ -148,7 +140,7 @@ class PoseVideoProcessor(VideoProcessorBase):
 
             current_dist_cm = raw_dist_cm * self.calib_ratio
 
-            # 判定狀態：給 OpenCV 的是英文字 (不產生亂碼)，給 status_str 的是中文 (用於語音與 UI)
+            # 判定狀態：影像畫面上只繪製英文字串 (避免 OpenCV 產生 ???? 亂碼)
             if self.min_target_cm <= current_dist_cm <= self.max_target_cm:
                 status_str = "合格"
                 display_overlay_text = "PASS"
@@ -168,7 +160,6 @@ class PoseVideoProcessor(VideoProcessorBase):
             cv2.circle(img, (thumb_mid_x, thumb_mid_y), 8, (255, 255, 0), -1)
             cv2.line(img, (eye_mid_x, eye_mid_y), (thumb_mid_x, thumb_mid_y), line_color, 3)
 
-            # 畫面上只印英文，避免出現 ???? 亂碼
             cv2.putText(img, f"{current_dist_cm:.1f} cm | {display_overlay_text}", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, line_color, 2)
 
@@ -206,56 +197,73 @@ if ctx.video_processor:
     ctx.video_processor.scale_factor = scale_factor
 
 with col2:
-    st.subheader("📊 檢測數據與語音控制")
+    st.subheader("📊 檢測結果與語音提示")
     
-    # 點擊解鎖瀏覽器語音權限按鈕
-    components.html("""
-        <button onclick="enableSpeech()" style="
-            width: 100%;
-            padding: 12px;
-            background-color: #28a745;
-            color: white;
-            border: none;
-            border-radius: 6px;
-            font-size: 15px;
-            font-weight: bold;
-            cursor: pointer;">
-            🔊 第一步：點此啟用瀏覽器語音
-        </button>
+    current_status = ctx.video_processor.status_str if ctx.video_processor else "請開啟攝影機"
+    current_dist = f"{ctx.video_processor.current_dist_cm:.1f}" if ctx.video_processor else "0.0"
+
+    # 使用純前端 JS 控管語音與顯示，不鎖死 Streamlit 伺服器
+    components.html(f"""
+        <div style="font-family: sans-serif; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #e9ecef;">
+            <p style="margin: 0; font-size: 13px; color: #6c757d;">當前狀態：</p>
+            <h3 style="margin: 5px 0 15px 0; color: #0d6efd;">{current_status}</h3>
+            
+            <p style="margin: 0; font-size: 13px; color: #6c757d;">測量距離：</p>
+            <h2 style="margin: 5px 0 15px 0; color: #212529;">{current_dist} cm</h2>
+
+            <button id="speech-btn" onclick="initSpeech()" style="
+                width: 100%;
+                padding: 10px;
+                background-color: #198754;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                font-size: 14px;
+                font-weight: bold;
+                cursor: pointer;">
+                🔊 點此解鎖語音功能
+            </button>
+            <p id="speech-info" style="margin: 5px 0 0 0; font-size: 11px; color: #6c757d; text-align: center;">
+                瀏覽器預設阻擋自動發音，開鏡頭前請先點擊一次
+            </p>
+        </div>
+
         <script>
-            function enableSpeech() {
+            var isAudioUnlocked = false;
+            var lastSpokenText = "";
+            var lastSpeakTime = 0;
+
+            function initSpeech() {{
                 window.speechSynthesis.cancel();
-                var msg = new SpeechSynthesisUtterance("語音功能已啟用");
+                var msg = new SpeechSynthesisUtterance("語音提示功能已啟用");
                 msg.lang = "zh-TW";
                 window.speechSynthesis.speak(msg);
-            }
+                
+                isAudioUnlocked = true;
+                var btn = document.getElementById("speech-btn");
+                btn.style.backgroundColor = "#0d6efd";
+                btn.innerText = "✅ 語音播報已就緒";
+                document.getElementById("speech-info").innerText = "檢測狀態改變時將自動進行語音提醒";
+            }}
+
+            function speak(text) {{
+                if (!isAudioUnlocked || !text || text === "未偵測到人體" || text === "請開啟攝影機") return;
+                
+                var now = Date.now();
+                // 狀態改變或冷卻時間滿 2.5 秒時發聲，防止聲音疊加
+                if (text !== lastSpokenText || (now - lastSpeakTime) > 2500) {{
+                    window.speechSynthesis.cancel();
+                    var msg = new SpeechSynthesisUtterance(text);
+                    msg.lang = "zh-TW";
+                    msg.rate = 1.0;
+                    window.speechSynthesis.speak(msg);
+                    
+                    lastSpokenText = text;
+                    lastSpeakTime = now;
+                }}
+            }}
+
+            // 自動嘗試播放當前文字
+            speak("{current_status}");
         </script>
-    """, height=55)
-
-    status_metric = st.empty()
-    dist_metric = st.empty()
-    tts_slot = st.empty()
-
-    # 開啟攝影機後，啟動背景數據輪詢迴圈
-    if ctx.video_processor and ctx.state.playing:
-        last_status = ""
-        last_speak_time = 0.0
-
-        # 當 WebRTC 正在播放時，持續抓取最新數據並即時播放語音
-        while ctx.state.playing:
-            current_status = ctx.video_processor.status_str
-            current_dist = ctx.video_processor.current_dist_cm
-
-            status_metric.metric("檢測狀態", current_status)
-            dist_metric.metric("當前測量距離", f"{current_dist:.1f} cm")
-
-            now = time.time()
-            # 當狀態改變，或距離維持同一狀態超過 2.5 秒時發聲提示
-            if current_status not in ["未偵測到人體", "請開啟攝影機"]:
-                if current_status != last_status or (now - last_speak_time > 2.5):
-                    with tts_slot:
-                        speak_js(current_status)
-                    last_status = current_status
-                    last_speak_time = now
-
-            time.sleep(0.3)  # 每 0.3 秒更新一次 UI 與判斷語音
+    """, height=220)
