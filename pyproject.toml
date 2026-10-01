@@ -8,4 +8,6 @@ dependencies = [
     "protobuf>=4.25.3,<5.0.0",
     "numpy<2",
     "opencv-python<5",
+    "streamlit-webrtc>=0.67.4",
+    "av>=17.1.0",
 ]
