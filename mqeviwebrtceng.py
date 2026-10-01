@@ -53,22 +53,19 @@ setup_mediapipe_cloud()
 mp_pose = mp.solutions.pose
 
 # -----------------------------------------------------------------------------
-# 【替換】使用 Metered.ca 的 TURN 伺服器設定
+# TURN 伺服器設定
 # -----------------------------------------------------------------------------
 RTC_CONFIG = RTCConfiguration({
     "iceServers": [
-        # 保留 Google 免費 STUN（處理大部分普通網路環境）
         {"urls": ["stun:stun.l.google.com:19302"]},
-        
-        # 加入 Metered TURN 設定（處理嚴格防火牆/Symmetric NAT）
         {
             "urls": [
                 "turn:openrelay.metered.ca:80",
                 "turn:openrelay.metered.ca:443",
                 "turns:openrelay.metered.ca:443?transport=tcp"
             ],
-            "username": "9736e7593c3eaefcd10e0afb",  # 填入 Metered 帳號/API Key
-            "credential": "0WH5wjRGFhfv3KxS" # 填入 Metered 密碼/Secret
+            "username": "9736e7593c3eaefcd10e0afb",
+            "credential": "0WH5wjRGFhfv3KxS"
         }
     ]
 })
@@ -93,6 +90,7 @@ class PoseVideoProcessor(VideoProcessorBase):
 
         self.current_dist_cm = 0.0
         self.status_str = "No detection human body"
+        self.status_category = "NO_HUMAN"  # 新增：供語音防抖判斷的固定分類
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
@@ -103,6 +101,7 @@ class PoseVideoProcessor(VideoProcessorBase):
         results = self.pose.process(rgb_frame)
 
         status_str = "No detection human body"
+        status_category = "NO_HUMAN"
         line_color = (200, 200, 200)
         current_dist_cm = 0.0
 
@@ -141,16 +140,19 @@ class PoseVideoProcessor(VideoProcessorBase):
 
             if self.min_target_cm <= current_dist_cm <= self.max_target_cm:
                 status_str = "Pass"
+                status_category = "PASS"
                 display_overlay_text = "PASS"
                 line_color = (0, 255, 0)
             elif current_dist_cm < self.min_target_cm:
                 diff_cm = self.min_target_cm - current_dist_cm
                 status_str = f"Please move further {diff_cm:.1f} cm"
+                status_category = "TOO_CLOSE"
                 display_overlay_text = f"TOO CLOSE (-{diff_cm:.1f}cm)"
                 line_color = (0, 0, 255)
             else:
                 diff_cm = current_dist_cm - self.max_target_cm
                 status_str = f"Please move closer {diff_cm:.1f} cm"
+                status_category = "TOO_FAR"
                 display_overlay_text = f"TOO FAR (+{diff_cm:.1f}cm)"
                 line_color = (0, 0, 255)
 
@@ -161,13 +163,13 @@ class PoseVideoProcessor(VideoProcessorBase):
             cv2.putText(img, f"{current_dist_cm:.1f} cm | {display_overlay_text}", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, line_color, 2)
         else:
-            # 未偵測到人體時顯示提示框
             cv2.rectangle(img, (30, 30), (w - 30, h - 30), (0, 255, 255), 2)
             cv2.putText(img, "PLEASE ENTER FRAME (CENTER YOURSELF)", (50, 70),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
         self.current_dist_cm = current_dist_cm
         self.status_str = status_str
+        self.status_category = status_category
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
@@ -177,9 +179,11 @@ class PoseVideoProcessor(VideoProcessorBase):
 st.title("📷 Visual Inspection Distance (WebRTC Version)")
 st.caption("Standard Range: 30 ~ 32 cm")
 
-# 【新增修改點 1】初始化 Session State 紀錄上次播放語音的檢測狀態，避免重複語音觸發
-if "last_speech_status" not in st.session_state:
-    st.session_state.last_speech_status = ""
+# Session State 初始化：儲存上次播報的狀態分類與時間戳記
+if "last_speech_category" not in st.session_state:
+    st.session_state.last_speech_category = ""
+if "last_speech_time" not in st.session_state:
+    st.session_state.last_speech_time = 0.0
 
 st.sidebar.header("⚙️ System Parameters")
 use_3d_world = st.sidebar.toggle("Enable 3D World Real-distance Mode", value=True)
@@ -194,7 +198,6 @@ with col1:
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIG,
         video_processor_factory=PoseVideoProcessor,
-        # 將解析度調至 640x480 加快 ICE 握手與串流建立速度
         media_stream_constraints={
             "video": {
                 "width": {"ideal": 640},
@@ -214,7 +217,7 @@ if ctx.video_processor:
 with col2:
     st.subheader("📊 Inspection result and voice prompt")
     
-    # 點擊啟用語音按鈕
+    # 啟用語音按鈕
     components.html("""
         <button id="speech-btn" onclick="initSpeech()" style="
             width: 100%;
@@ -242,36 +245,52 @@ with col2:
         </script>
     """, height=55)
 
-    # 片段自動刷新區塊（每 1.0 秒自動同步 UI 與驅動語音）
+    # 每秒刷新並判斷語音觸發
     @st.fragment(run_every=1.0)
     def render_realtime_metrics():
         if ctx.video_processor and ctx.state.playing:
             status_val = ctx.video_processor.status_str
+            category_val = getattr(ctx.video_processor, "status_category", "NO_HUMAN")
             dist_val = ctx.video_processor.current_dist_cm
 
             st.metric("current inspection status", status_val)
             st.metric("measurement distance", f"{dist_val:.1f} cm")
 
-            # 【新增修改點 2】加入狀態改變判斷邏輯（status_val != st.session_state.last_speech_status）
-            # 只有當檢測狀態文字發生變化時才發聲，防止每秒重複觸發導致語音中斷、卡頓與扭曲
-            ignored_statuses = ["No detection human body", "Please turn on the camera"]
-            if status_val not in ignored_statuses and status_val != st.session_state.last_speech_status:
-                st.session_state.last_speech_status = status_val  # 【新增修改點 3】更新發聲狀態紀錄
-                safe_text = status_val.replace("'", "\\'")
-                components.html(f"""
-                    <script>
-                        if ('speechSynthesis' in window) {{
-                            window.speechSynthesis.cancel();
-                            var msg = new SpeechSynthesisUtterance('{safe_text}');
-                            msg.lang = 'en-US';
-                            window.speechSynthesis.speak(msg);
-                        }}
-                    </script>
-                """, height=0, width=0)
+            current_time = time.time()
+            time_passed = current_time - st.session_state.last_speech_time
+
+            # 語音防抖條件：
+            # 1. 偵測到有效人體 (類別非 NO_HUMAN)
+            # 2. 狀態分類發生改變 OR 距離上次發聲已滿 3 秒 (Cooldown)
+            if category_val != "NO_HUMAN":
+                if category_val != st.session_state.last_speech_category or time_passed >= 3.0:
+                    st.session_state.last_speech_category = category_val
+                    st.session_state.last_speech_time = current_time
+
+                    # 固定語句映射表，避免動態數字微幅抖動
+                    speech_text_map = {
+                        "PASS": "Pass",
+                        "TOO_CLOSE": "Please move back",
+                        "TOO_FAR": "Please move closer"
+                    }
+                    speech_text = speech_text_map.get(category_val, "")
+
+                    if speech_text:
+                        components.html(f"""
+                            <script>
+                                if ('speechSynthesis' in window) {{
+                                    window.speechSynthesis.cancel();
+                                    var msg = new SpeechSynthesisUtterance('{speech_text}');
+                                    msg.lang = 'en-US';
+                                    window.speechSynthesis.speak(msg);
+                                }}
+                            </script>
+                        """, height=0, width=0)
         else:
             st.metric("current inspection status", "Please turn on the camera")
             st.metric("measurement distance", "0.0 cm")
-            # 【新增修改點 4】攝影機關閉或未連線時，重置發聲紀錄狀態
-            st.session_state.last_speech_status = ""
+            # 關閉攝影機時重置狀態
+            st.session_state.last_speech_category = ""
+            st.session_state.last_speech_time = 0.0
 
     render_realtime_metrics()
