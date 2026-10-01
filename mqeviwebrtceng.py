@@ -231,7 +231,7 @@ with col2:
         <script>
             function initSpeech() {
                 window.speechSynthesis.cancel();
-                var msg = new SpeechSynthesisUtterance("Enable Voice prompt function");
+                var msg = new SpeechSynthesisUtterance("Voice prompt function enabled");
                 msg.lang = "en-US";
                 window.speechSynthesis.speak(msg);
                 
