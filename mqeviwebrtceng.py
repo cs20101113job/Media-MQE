@@ -90,7 +90,7 @@ class PoseVideoProcessor(VideoProcessorBase):
 
         self.current_dist_cm = 0.0
         self.status_str = "No detection human body"
-        self.status_category = "NO_HUMAN"  # 新增：供語音防抖判斷的固定分類
+        self.status_category = "NO_HUMAN"
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
@@ -179,7 +179,7 @@ class PoseVideoProcessor(VideoProcessorBase):
 st.title("📷 Visual Inspection Distance (WebRTC Version)")
 st.caption("Standard Range: 30 ~ 32 cm")
 
-# Session State 初始化：儲存上次播報的狀態分類與時間戳記
+# Session State 初始化
 if "last_speech_category" not in st.session_state:
     st.session_state.last_speech_category = ""
 if "last_speech_time" not in st.session_state:
@@ -218,7 +218,7 @@ if ctx.video_processor:
 with col2:
     st.subheader("📊 Inspection result and voice prompt")
     
-    # 啟用語音按鈕（加入人聲選擇與音調設定）
+    # 啟用語音按鈕
     components.html("""
         <button id="speech-btn" onclick="initSpeech()" style="
             width: 100%;
@@ -237,11 +237,10 @@ with col2:
                 window.speechSynthesis.cancel();
                 var msg = new SpeechSynthesisUtterance("Enable Voice prompt function");
                 msg.lang = "en-US";
-                msg.pitch = 1.1; // 略微提升音調，讓聲音更自然
-                msg.rate = 1.0;  // 正常語速
+                msg.pitch = 1.1;
+                msg.rate = 1.0;
 
                 var voices = window.speechSynthesis.getVoices();
-                // 優先選擇常見自然的英文女聲/標準語音
                 var preferredVoice = voices.find(v => v.lang.includes('en') && (
                     v.name.includes('Google') || 
                     v.name.includes('Zira') || 
@@ -260,7 +259,7 @@ with col2:
         </script>
     """, height=55)
 
-    # 每秒刷新並判斷語音觸發
+    # 每秒刷新並判斷語音觸發與顯示數值
     @st.fragment(run_every=1.0)
     def render_realtime_metrics():
         if ctx.video_processor and ctx.state.playing:
@@ -268,21 +267,29 @@ with col2:
             category_val = getattr(ctx.video_processor, "status_category", "NO_HUMAN")
             dist_val = ctx.video_processor.current_dist_cm
 
-            st.metric("current inspection status", status_val)
-            st.metric("measurement distance", f"{dist_val:.1f} cm")
+            # 使用自訂 HTML/Markdown 區塊取代 st.metric，支援自動換行（word-break）避免截斷變形
+            st.markdown(f"""
+                <div style="background-color: #262730; padding: 12px; border-radius: 6px; margin-top: 10px; border: 1px solid #464855;">
+                    <div style="font-size: 13px; color: #a3a8b8; margin-bottom: 4px;">Current Inspection Status</div>
+                    <div style="font-size: 18px; font-weight: bold; color: #ffffff; word-break: break-word; line-height: 1.3;">{status_val}</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown(f"""
+                <div style="background-color: #262730; padding: 12px; border-radius: 6px; margin-top: 10px; border: 1px solid #464855;">
+                    <div style="font-size: 13px; color: #a3a8b8; margin-bottom: 4px;">Measurement Distance</div>
+                    <div style="font-size: 22px; font-weight: bold; color: #0dcaf0;">{dist_val:.1f} cm</div>
+                </div>
+            """, unsafe_allow_html=True)
 
             current_time = time.time()
             time_passed = current_time - st.session_state.last_speech_time
 
-            # 語音防抖條件：
-            # 1. 偵測到有效人體 (類別非 NO_HUMAN)
-            # 2. 狀態分類發生改變 OR 距離上次發聲已滿 3 秒 (Cooldown)
             if category_val != "NO_HUMAN":
                 if category_val != st.session_state.last_speech_category or time_passed >= 3.0:
                     st.session_state.last_speech_category = category_val
                     st.session_state.last_speech_time = current_time
 
-                    # 固定語意對應
                     speech_text_map = {
                         "PASS": "Pass",
                         "TOO_CLOSE": "Please move back",
@@ -297,12 +304,11 @@ with col2:
                                     window.speechSynthesis.cancel();
                                     var msg = new SpeechSynthesisUtterance('{speech_text}');
                                     msg.lang = 'en-US';
-                                    msg.pitch = 1.1; // 調整音調（1.0~1.2 之間最自然）
-                                    msg.rate = 1.0;  // 語速
+                                    msg.pitch = 1.1;
+                                    msg.rate = 1.0;
 
                                     function speakWithSelectedVoice() {{
                                         var voices = window.speechSynthesis.getVoices();
-                                        // 優先篩選清晰自然的英語人聲
                                         var selectedVoice = voices.find(v => 
                                             v.lang.startsWith('en') && (
                                                 v.name.includes('Google') || 
@@ -320,7 +326,6 @@ with col2:
                                         window.speechSynthesis.speak(msg);
                                     }}
 
-                                    // Chrome/Edge 異步加載語音處理
                                     var voices = window.speechSynthesis.getVoices();
                                     if (voices.length > 0) {{
                                         speakWithSelectedVoice();
@@ -331,9 +336,20 @@ with col2:
                             </script>
                         """, height=0, width=0)
         else:
-            st.metric("current inspection status", "Please turn on the camera")
-            st.metric("measurement distance", "0.0 cm")
-            # 關閉攝影機時重置狀態
+            st.markdown("""
+                <div style="background-color: #262730; padding: 12px; border-radius: 6px; margin-top: 10px; border: 1px solid #464855;">
+                    <div style="font-size: 13px; color: #a3a8b8; margin-bottom: 4px;">Current Inspection Status</div>
+                    <div style="font-size: 18px; font-weight: bold; color: #ffffff; word-break: break-word; line-height: 1.3;">Please turn on the camera</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("""
+                <div style="background-color: #262730; padding: 12px; border-radius: 6px; margin-top: 10px; border: 1px solid #464855;">
+                    <div style="font-size: 13px; color: #a3a8b8; margin-bottom: 4px;">Measurement Distance</div>
+                    <div style="font-size: 22px; font-weight: bold; color: #0dcaf0;">0.0 cm</div>
+                </div>
+            """, unsafe_allow_html=True)
+            
             st.session_state.last_speech_category = ""
             st.session_state.last_speech_time = 0.0
 
