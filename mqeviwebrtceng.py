@@ -190,7 +190,8 @@ use_3d_world = st.sidebar.toggle("Enable 3D World Real-distance Mode", value=Tru
 calib_ratio = st.sidebar.slider("Distance Calibration Ratio", min_value=0.1, max_value=2.0, value=0.85, step=0.01)
 scale_factor = st.sidebar.slider("2D Pixels to Centimeters Ratio (Scale Factor)", min_value=0.01, max_value=0.50, value=0.15, step=0.005)
 
-col1, col2 = st.columns([3, 1])
+# 調整左右欄位比例從 [3, 1] 改為 [2, 1]，給右側更多空間防擠壓
+col1, col2 = st.columns([2, 1])
 
 with col1:
     ctx = webrtc_streamer(
