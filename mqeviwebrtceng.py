@@ -73,20 +73,6 @@ RTC_CONFIG = RTCConfiguration({
     ]
 })
 
-# # -----------------------------------------------------------------------------
-# # 【方案 A 修改】WebRTC 多組 Google / Twilio STUN 伺服器配置（提高連線成功率）
-# # -----------------------------------------------------------------------------
-# RTC_CONFIG = RTCConfiguration({
-#     "iceServers": [
-#         {"urls": ["stun:stun.l.google.com:19302"]},
-#         {"urls": ["stun:stun1.l.google.com:19302"]},
-#         {"urls": ["stun:stun2.l.google.com:19302"]},
-#         {"urls": ["stun:stun3.l.google.com:19302"]},
-#         {"urls": ["stun:stun4.l.google.com:19302"]},
-#         {"urls": ["stun:global.stun.twilio.com:3478"]}
-#     ]
-# })
-
 # -----------------------------------------------------------------------------
 # 3. WebRTC 影像處理類別
 # -----------------------------------------------------------------------------
@@ -191,6 +177,10 @@ class PoseVideoProcessor(VideoProcessorBase):
 st.title("📷 Visual Inspection Distance (WebRTC Version)")
 st.caption("Standard Range: 30 ~ 32 cm")
 
+# 【新增修改點 1】初始化 Session State 紀錄上次播放語音的檢測狀態，避免重複語音觸發
+if "last_speech_status" not in st.session_state:
+    st.session_state.last_speech_status = ""
+
 st.sidebar.header("⚙️ System Parameters")
 use_3d_world = st.sidebar.toggle("Enable 3D World Real-distance Mode", value=True)
 calib_ratio = st.sidebar.slider("Distance Calibration Ratio", min_value=0.1, max_value=2.0, value=0.85, step=0.01)
@@ -204,7 +194,7 @@ with col1:
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIG,
         video_processor_factory=PoseVideoProcessor,
-        # 【修改點】將解析度調至 640x480 加快 ICE 握手與串流建立速度
+        # 將解析度調至 640x480 加快 ICE 握手與串流建立速度
         media_stream_constraints={
             "video": {
                 "width": {"ideal": 640},
@@ -262,8 +252,11 @@ with col2:
             st.metric("current inspection status", status_val)
             st.metric("measurement distance", f"{dist_val:.1f} cm")
 
-            # 狀態改變時發聲
-            if status_val not in ["No detection human body", "Please turn on the camera"]:
+            # 【新增修改點 2】加入狀態改變判斷邏輯（status_val != st.session_state.last_speech_status）
+            # 只有當檢測狀態文字發生變化時才發聲，防止每秒重複觸發導致語音中斷、卡頓與扭曲
+            ignored_statuses = ["No detection human body", "Please turn on the camera"]
+            if status_val not in ignored_statuses and status_val != st.session_state.last_speech_status:
+                st.session_state.last_speech_status = status_val  # 【新增修改點 3】更新發聲狀態紀錄
                 safe_text = status_val.replace("'", "\\'")
                 components.html(f"""
                     <script>
@@ -278,5 +271,7 @@ with col2:
         else:
             st.metric("current inspection status", "Please turn on the camera")
             st.metric("measurement distance", "0.0 cm")
+            # 【新增修改點 4】攝影機關閉或未連線時，重置發聲紀錄狀態
+            st.session_state.last_speech_status = ""
 
     render_realtime_metrics()
