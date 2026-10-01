@@ -279,40 +279,4 @@ with col2:
             st.metric("current inspection status", "Please turn on the camera")
             st.metric("measurement distance", "0.0 cm")
 
-    # 片段自動刷新區塊（每 1.0 秒自動同步 UI 與驅動語音）
-    @st.fragment(run_every=1.0)
-    def render_realtime_metrics():
-        if ctx.video_processor and ctx.state.playing:
-            status_val = ctx.video_processor.status_str
-            dist_val = ctx.video_processor.current_dist_cm
-
-            st.metric("current inspection status", status_val)
-            st.metric("measurement distance", f"{dist_val:.1f} cm")
-
-            # 狀態改變時才發聲，防止每秒強行 cancel 導致音訊緩衝區失真
-            if status_val not in ["No detection human body", "Please turn on the camera"]:
-                safe_text = status_val.replace("'", "\\'")
-                components.html(f"""
-                    <script>
-                        if ('speechSynthesis' in window) {{
-                            // 利用 window.parent 記錄全域狀態，避免 iframe 重建導致狀態遺失
-                            if (window.parent.lastSpokenText !== '{safe_text}') {{
-                                window.parent.lastSpokenText = '{safe_text}';
-                                
-                                window.speechSynthesis.cancel();
-                                var msg = new SpeechSynthesisUtterance('{safe_text}');
-                                msg.lang = 'en-US'; // 修正空格問題
-                                msg.rate = 1.0;     // 標準語速
-                                msg.pitch = 1.0;    // 標準音調
-                                msg.volume = 1.0;   // 最大音量
-
-                                window.speechSynthesis.speak(msg);
-                            }}
-                        }}
-                    </script>
-                """, height=0, width=0)
-        else:
-            st.metric("current inspection status", "Please turn on the camera")
-            st.metric("measurement distance", "0.0 cm")
-
     render_realtime_metrics()
