@@ -167,13 +167,13 @@ class PoseVideoProcessor(VideoProcessorBase):
 # -----------------------------------------------------------------------------
 # 4. Streamlit UI 介面設定
 # -----------------------------------------------------------------------------
-st.title("📷 Visual Inspection Distance (WebRTC版)")
+st.title("📷 Visual Inspection Distance (WebRTC Version)")
 st.caption("Standard Range: 30 ~ 32 cm")
 
 st.sidebar.header("⚙️ System Parameters")
 use_3d_world = st.sidebar.toggle("Enable 3D World Real-distance Mode", value=True)
 calib_ratio = st.sidebar.slider("Distance Calibration Ratio", min_value=0.1, max_value=2.0, value=0.85, step=0.01)
-scale_factor = st.sidebar.slider("2D 像素轉公分比例 (Scale Factor)", min_value=0.01, max_value=0.50, value=0.15, step=0.005)
+scale_factor = st.sidebar.slider("2D Pixels to Centimeters Ratio (Scale Factor)", min_value=0.01, max_value=0.50, value=0.15, step=0.005)
 
 col1, col2 = st.columns([3, 1])
 
@@ -221,7 +221,7 @@ with col2:
             function initSpeech() {
                 window.speechSynthesis.cancel();
                 var msg = new SpeechSynthesisUtterance("Voice prompt function enabled");
-                msg.lang = "zh-TW";
+                msg.lang = " en-US";
                 window.speechSynthesis.speak(msg);
                 
                 var btn = document.getElementById("speech-btn");
@@ -249,7 +249,7 @@ with col2:
                         if ('speechSynthesis' in window) {{
                             window.speechSynthesis.cancel();
                             var msg = new SpeechSynthesisUtterance('{safe_text}');
-                            msg.lang = 'zh-TW';
+                            msg.lang = 'en-US';
                             window.speechSynthesis.speak(msg);
                         }}
                     </script>
