@@ -53,18 +53,39 @@ setup_mediapipe_cloud()
 mp_pose = mp.solutions.pose
 
 # -----------------------------------------------------------------------------
-# 【方案 A 修改】WebRTC 多組 Google / Twilio STUN 伺服器配置（提高連線成功率）
+# 【替換】使用 Metered.ca 的 TURN 伺服器設定
 # -----------------------------------------------------------------------------
 RTC_CONFIG = RTCConfiguration({
     "iceServers": [
+        # 保留 Google 免費 STUN（處理大部分普通網路環境）
         {"urls": ["stun:stun.l.google.com:19302"]},
-        {"urls": ["stun:stun1.l.google.com:19302"]},
-        {"urls": ["stun:stun2.l.google.com:19302"]},
-        {"urls": ["stun:stun3.l.google.com:19302"]},
-        {"urls": ["stun:stun4.l.google.com:19302"]},
-        {"urls": ["stun:global.stun.twilio.com:3478"]}
+        
+        # 加入 Metered TURN 設定（處理嚴格防火牆/Symmetric NAT）
+        {
+            "urls": [
+                "turn:openrelay.metered.ca:80",
+                "turn:openrelay.metered.ca:443",
+                "turns:openrelay.metered.ca:443?transport=tcp"
+            ],
+            "username": "9736e7593c3eaefcd10e0afb",  # 填入 Metered 帳號/API Key
+            "credential": "0WH5wjRGFhfv3KxS" # 填入 Metered 密碼/Secret
+        }
     ]
 })
+
+# # -----------------------------------------------------------------------------
+# # 【方案 A 修改】WebRTC 多組 Google / Twilio STUN 伺服器配置（提高連線成功率）
+# # -----------------------------------------------------------------------------
+# RTC_CONFIG = RTCConfiguration({
+#     "iceServers": [
+#         {"urls": ["stun:stun.l.google.com:19302"]},
+#         {"urls": ["stun:stun1.l.google.com:19302"]},
+#         {"urls": ["stun:stun2.l.google.com:19302"]},
+#         {"urls": ["stun:stun3.l.google.com:19302"]},
+#         {"urls": ["stun:stun4.l.google.com:19302"]},
+#         {"urls": ["stun:global.stun.twilio.com:3478"]}
+#     ]
+# })
 
 # -----------------------------------------------------------------------------
 # 3. WebRTC 影像處理類別
