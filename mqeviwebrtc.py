@@ -52,23 +52,6 @@ def setup_mediapipe_cloud():
 setup_mediapipe_cloud()
 mp_pose = mp.solutions.pose
 
-# 【修復首次卡頓】使用 st.cache_resource 快取模型並進行暖機 (Warm-up)
-@st.cache_resource
-def get_mp_pose_model():
-    pose = mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=0,
-        smooth_landmarks=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
-    # 預熱：傳入一張 640x480 的全黑假影像執行第一次推論，提早消化冷啟動耗時
-    dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    pose.process(dummy_frame)
-    return pose
-
-cached_pose_model = get_mp_pose_model()
-
 # -----------------------------------------------------------------------------
 # 【方案 A 修改】WebRTC 多組 Google / Twilio STUN 伺服器配置（提高連線成功率）
 # -----------------------------------------------------------------------------
@@ -88,7 +71,13 @@ RTC_CONFIG = RTCConfiguration({
 # -----------------------------------------------------------------------------
 class PoseVideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self.pose = cached_pose_model
+        self.pose = mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=0,
+            smooth_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
         self.use_3d_world = True
         self.calib_ratio = 0.85
         self.scale_factor = 0.15
@@ -242,8 +231,8 @@ with col2:
         </script>
     """, height=55)
 
-    # 片段自動刷新區塊（每 2.0 秒自動同步 UI 與驅動語音）
-    @st.fragment(run_every=2.0)
+    # 片段自動刷新區塊（每 1.0 秒自動同步 UI 與驅動語音）
+    @st.fragment(run_every=1.0)
     def render_realtime_metrics():
         if ctx.video_processor and ctx.state.playing:
             status_val = ctx.video_processor.status_str
