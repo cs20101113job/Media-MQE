@@ -221,7 +221,7 @@ with col2:
             function initSpeech() {
                 window.speechSynthesis.cancel();
                 var msg = new SpeechSynthesisUtterance("Voice prompt function enabled");
-                msg.lang = 'en-US';
+                msg.lang = "en-US";
                 window.speechSynthesis.speak(msg);
                 
                 var btn = document.getElementById("speech-btn");
@@ -249,7 +249,7 @@ with col2:
                         if ('speechSynthesis' in window) {{
                             window.speechSynthesis.cancel();
                             var msg = new SpeechSynthesisUtterance('{safe_text}');
-                            msg.lang = 'en-US';
+                            msg.lang = "en-US";
                             window.speechSynthesis.speak(msg);
                         }}
                     </script>
