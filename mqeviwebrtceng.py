@@ -21,7 +21,7 @@ from mediapipe.python.solutions import download_utils
 st.set_page_config(page_title="Visual Inspection Distance (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 2. 修復 MediaPipe Cloud 唯讀權限問題
+# 2. 修復 MediaPipe Cloud 唯讀權限問題 & 模型的快取與預熱 (Warm-up)
 # -----------------------------------------------------------------------------
 def setup_mediapipe_cloud():
     mp_path = os.path.dirname(mp.__file__)
@@ -52,8 +52,25 @@ def setup_mediapipe_cloud():
 setup_mediapipe_cloud()
 mp_pose = mp.solutions.pose
 
+# 【修復首次卡頓】使用 st.cache_resource 快取模型並進行暖機 (Warm-up)
+@st.cache_resource
+def get_mp_pose_model():
+    pose = mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=0,
+        smooth_landmarks=True,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+    # 預熱：傳入一張 640x480 的全黑假影像執行第一次推論，提早消化冷啟動耗時
+    dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    pose.process(dummy_frame)
+    return pose
+
+cached_pose_model = get_mp_pose_model()
+
 # -----------------------------------------------------------------------------
-# 【替換】使用 Metered.ca 的 TURN 伺服器設定
+# WebRTC TURN 伺服器設定
 # -----------------------------------------------------------------------------
 RTC_CONFIG = RTCConfiguration({
     "iceServers": [
@@ -78,13 +95,8 @@ RTC_CONFIG = RTCConfiguration({
 # -----------------------------------------------------------------------------
 class PoseVideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self.pose = mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=0,
-            smooth_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+        # 使用全域預熱好的模型，避免重複建構模型導致畫面凍結
+        self.pose = cached_pose_model
         self.use_3d_world = True
         self.calib_ratio = 0.85
         self.scale_factor = 0.15
@@ -177,7 +189,7 @@ class PoseVideoProcessor(VideoProcessorBase):
 st.title("📷 Visual Inspection Distance (WebRTC Version)")
 st.caption("Standard Range: 30 ~ 32 cm")
 
-# 【新增修改點 1】初始化 Session State 紀錄上次播放語音的檢測狀態，避免重複語音觸發
+# 【修復語音爆音】初始化 session state 紀錄上次發聲狀態
 if "last_speech_status" not in st.session_state:
     st.session_state.last_speech_status = ""
 
@@ -194,7 +206,6 @@ with col1:
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIG,
         video_processor_factory=PoseVideoProcessor,
-        # 將解析度調至 640x480 加快 ICE 握手與串流建立速度
         media_stream_constraints={
             "video": {
                 "width": {"ideal": 640},
@@ -231,7 +242,7 @@ with col2:
         <script>
             function initSpeech() {
                 window.speechSynthesis.cancel();
-                var msg = new SpeechSynthesisUtterance("Voice prompt function enabled");
+                var msg = new SpeechSynthesisUtterance("Enable Voice prompt function");
                 msg.lang = "en-US";
                 window.speechSynthesis.speak(msg);
                 
@@ -252,11 +263,10 @@ with col2:
             st.metric("current inspection status", status_val)
             st.metric("measurement distance", f"{dist_val:.1f} cm")
 
-            # 【新增修改點 2】加入狀態改變判斷邏輯（status_val != st.session_state.last_speech_status）
-            # 只有當檢測狀態文字發生變化時才發聲，防止每秒重複觸發導致語音中斷、卡頓與扭曲
+            # 忽略初始與無人狀態，且只有在「檢測狀態文字改變」時才播報語音，解決連續 cancel 導致的語音失真
             ignored_statuses = ["No detection human body", "Please turn on the camera"]
             if status_val not in ignored_statuses and status_val != st.session_state.last_speech_status:
-                st.session_state.last_speech_status = status_val  # 【新增修改點 3】更新發聲狀態紀錄
+                st.session_state.last_speech_status = status_val
                 safe_text = status_val.replace("'", "\\'")
                 components.html(f"""
                     <script>
@@ -271,7 +281,6 @@ with col2:
         else:
             st.metric("current inspection status", "Please turn on the camera")
             st.metric("measurement distance", "0.0 cm")
-            # 【新增修改點 4】攝影機關閉或未連線時，重置發聲紀錄狀態
             st.session_state.last_speech_status = ""
 
     render_realtime_metrics()
