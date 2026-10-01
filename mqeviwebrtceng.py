@@ -190,7 +190,7 @@ use_3d_world = st.sidebar.toggle("Enable 3D World Real-distance Mode", value=Tru
 calib_ratio = st.sidebar.slider("Distance Calibration Ratio", min_value=0.1, max_value=2.0, value=0.85, step=0.01)
 scale_factor = st.sidebar.slider("2D Pixels to Centimeters Ratio (Scale Factor)", min_value=0.01, max_value=0.50, value=0.15, step=0.005)
 
-# 調整左右欄位比例從 [3, 1] 改為 [2, 1]，給右側更多空間防擠壓
+# 調整欄位比例防擠壓
 col1, col2 = st.columns([2, 1])
 
 with col1:
@@ -218,7 +218,7 @@ if ctx.video_processor:
 with col2:
     st.subheader("📊 Inspection result and voice prompt")
     
-    # 啟用語音按鈕
+    # 啟用語音按鈕（移除 pitch 變速，鎖定標準高畫質人聲）
     components.html("""
         <button id="speech-btn" onclick="initSpeech()" style="
             width: 100%;
@@ -234,27 +234,29 @@ with col2:
         </button>
         <script>
             function initSpeech() {
-                window.speechSynthesis.cancel();
-                var msg = new SpeechSynthesisUtterance("Enable Voice prompt function");
-                msg.lang = "en-US";
-                msg.pitch = 1.1;
-                msg.rate = 1.0;
+                if ('speechSynthesis' in window) {
+                    window.speechSynthesis.cancel();
+                    var msg = new SpeechSynthesisUtterance("Enable Voice prompt function");
+                    msg.lang = "en-US";
+                    msg.pitch = 1.0; // 必須為 1.0，避免觸發 Chrome 音頻重採樣變聲失真
+                    msg.rate = 1.0;
 
-                var voices = window.speechSynthesis.getVoices();
-                var preferredVoice = voices.find(v => v.lang.includes('en') && (
-                    v.name.includes('Google') || 
-                    v.name.includes('Zira') || 
-                    v.name.includes('Samantha') || 
-                    v.name.includes('Jenny') ||
-                    v.name.includes('Natural')
-                ));
-                if (preferredVoice) msg.voice = preferredVoice;
+                    var voices = window.speechSynthesis.getVoices();
+                    var preferredVoice = voices.find(v => v.lang.startsWith('en') && (
+                        v.name.includes('Zira') || 
+                        v.name.includes('Jenny') || 
+                        v.name.includes('Google US English') ||
+                        v.name.includes('Samantha') || 
+                        v.name.includes('Natural')
+                    ));
+                    if (preferredVoice) msg.voice = preferredVoice;
 
-                window.speechSynthesis.speak(msg);
-                
-                var btn = document.getElementById("speech-btn");
-                btn.style.backgroundColor = "#0d6efd";
-                btn.innerText = "✅ Voice prompt is ready";
+                    window.speechSynthesis.speak(msg);
+                    
+                    var btn = document.getElementById("speech-btn");
+                    btn.style.backgroundColor = "#0d6efd";
+                    btn.innerText = "✅ Voice prompt is ready";
+                }
             }
         </script>
     """, height=55)
@@ -267,7 +269,7 @@ with col2:
             category_val = getattr(ctx.video_processor, "status_category", "NO_HUMAN")
             dist_val = ctx.video_processor.current_dist_cm
 
-            # 使用自訂 HTML/Markdown 區塊取代 st.metric，支援自動換行（word-break）避免截斷變形
+            # 卡片式佈局：自動換行防止文字被剪切截斷
             st.markdown(f"""
                 <div style="background-color: #262730; padding: 12px; border-radius: 6px; margin-top: 10px; border: 1px solid #464855;">
                     <div style="font-size: 13px; color: #a3a8b8; margin-bottom: 4px;">Current Inspection Status</div>
@@ -304,19 +306,18 @@ with col2:
                                     window.speechSynthesis.cancel();
                                     var msg = new SpeechSynthesisUtterance('{speech_text}');
                                     msg.lang = 'en-US';
-                                    msg.pitch = 1.1;
+                                    msg.pitch = 1.0; // 保持 1.0，防止 WebRTC 採樣率拉伸失真
                                     msg.rate = 1.0;
 
                                     function speakWithSelectedVoice() {{
                                         var voices = window.speechSynthesis.getVoices();
                                         var selectedVoice = voices.find(v => 
                                             v.lang.startsWith('en') && (
-                                                v.name.includes('Google') || 
                                                 v.name.includes('Zira') || 
+                                                v.name.includes('Jenny') || 
+                                                v.name.includes('Google US English') ||
                                                 v.name.includes('Samantha') || 
-                                                v.name.includes('Jenny') ||
-                                                v.name.includes('Natural') ||
-                                                v.name.includes('Female')
+                                                v.name.includes('Natural')
                                             )
                                         ) || voices.find(v => v.lang.startsWith('en'));
 
