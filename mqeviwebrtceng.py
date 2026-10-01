@@ -279,4 +279,50 @@ with col2:
             st.metric("current inspection status", "Please turn on the camera")
             st.metric("measurement distance", "0.0 cm")
 
+    # 片段自動刷新區塊（每 1.0 秒自動同步 UI 與驅動語音）
+    @st.fragment(run_every=1.0)
+    def render_realtime_metrics():
+        if ctx.video_processor and ctx.state.playing:
+            status_val = ctx.video_processor.status_str
+            dist_val = ctx.video_processor.current_dist_cm
+
+            st.metric("current inspection status", status_val)
+            st.metric("measurement distance", f"{dist_val:.1f} cm")
+
+            # 狀態改變時發聲
+            if status_val not in ["No detection human body", "Please turn on the camera"]:
+                safe_text = status_val.replace("'", "\\'")
+                components.html(f"""
+                    <script>
+                        if ('speechSynthesis' in window) {{
+                            // 僅在狀態文字改變時才觸發發音，避免每秒 cancel 導致音量變小或聲音中斷
+                            if (window.parent.lastSpokenText !== '{safe_text}') {{
+                                window.parent.lastSpokenText = '{safe_text}';
+                                window.speechSynthesis.cancel();
+                                
+                                var msg = new SpeechSynthesisUtterance('{safe_text}');
+                                msg.lang = 'en-US';
+                                msg.pitch = 1.3;  // 提高音調 (1.0為預設，1.2~1.5偏偏高女聲)
+                                msg.rate = 1.0;   // 語速
+                                msg.volume = 1.0; // 音量 (最大 1.0)
+
+                                // 優先選用瀏覽器內建的女聲
+                                var voices = window.speechSynthesis.getVoices();
+                                var femaleVoice = voices.find(v => 
+                                    v.lang.includes('en') && 
+                                    (v.name.includes('Female') || v.name.includes('Zira') || v.name.includes('Samantha') || v.name.includes('Google US English'))
+                                );
+                                if (femaleVoice) {{
+                                    msg.voice = femaleVoice;
+                                }}
+
+                                window.speechSynthesis.speak(msg);
+                            }}
+                        }}
+                    </script>
+                """, height=0, width=0)
+        else:
+            st.metric("current inspection status", "Please turn on the camera")
+            st.metric("measurement distance", "0.0 cm")
+
     render_realtime_metrics()
