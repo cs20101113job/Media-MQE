@@ -231,8 +231,8 @@ with col2:
         </script>
     """, height=55)
 
-    # 片段自動刷新區塊（每 1.0 秒自動同步 UI 與驅動語音）
-    @st.fragment(run_every=1.0)
+    # 片段自動刷新區塊（每 2.0 秒自動同步 UI 與驅動語音）
+    @st.fragment(run_every=2.0)
     def render_realtime_metrics():
         if ctx.video_processor and ctx.state.playing:
             status_val = ctx.video_processor.status_str
