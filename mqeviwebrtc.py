@@ -6,6 +6,7 @@ import urllib.request
 import cv2
 import numpy as np
 import streamlit as st
+import streamlit.components.v1 as components
 import mediapipe as mp
 import av
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
@@ -31,7 +32,6 @@ def setup_mediapipe_cloud():
     target_file = os.path.join(tmp_mp_dir, "modules", "pose_landmark", "pose_landmark_lite.tflite")
 
     if not os.path.exists(target_file):
-        # 複製/軟連結 site-packages/mediapipe 的目錄結構至 /tmp/mediapipe_root/mediapipe
         for root, dirs, files in os.walk(mp_path):
             rel_path = os.path.relpath(root, mp_path)
             dest_dir = os.path.join(tmp_mp_dir, rel_path) if rel_path != "." else tmp_mp_dir
@@ -45,19 +45,13 @@ def setup_mediapipe_cloud():
                     except Exception:
                         shutil.copy2(src_file, dst_file)
 
-        # 下載模型檔案至 /tmp 可寫入目錄
         url = "https://storage.googleapis.com/mediapipe-assets/pose_landmark_lite.tflite"
         urllib.request.urlretrieve(url, target_file)
 
-    # 重定向 MediaPipe C++ 引擎的資源尋找目錄
     resource_util.set_resource_dir(tmp_root)
-
-    # Monkey-patch 關閉原本的 download_oss_model 避免觸發 site-packages 寫入
     download_utils.download_oss_model = lambda path: None
 
-# 執行修復
 setup_mediapipe_cloud()
-
 mp_pose = mp.solutions.pose
 
 # 設定 STUN 伺服器
@@ -70,11 +64,31 @@ RTC_CONFIG = RTCConfiguration({
 })
 
 # -----------------------------------------------------------------------------
+# 語音播報 Helper (使用瀏覽器 Web Speech API)
+# -----------------------------------------------------------------------------
+def speak_js(text: str):
+    """驅動瀏覽器端進行中文語音合成播報"""
+    if text:
+        # 替換單引號避免 JS 語法解析錯誤
+        safe_text = text.replace("'", "\\'")
+        js_code = f"""
+        <script>
+            if ('speechSynthesis' in window) {{
+                window.speechSynthesis.cancel(); // 先清除未完成的語音
+                var msg = new SpeechSynthesisUtterance('{safe_text}');
+                msg.lang = 'zh-TW';
+                msg.rate = 1.0;
+                window.speechSynthesis.speak(msg);
+            }}
+        </script>
+        """
+        components.html(js_code, height=0, width=0)
+
+# -----------------------------------------------------------------------------
 # 3. WebRTC 影像處理類別 (VideoProcessorBase)
 # -----------------------------------------------------------------------------
 class PoseVideoProcessor(VideoProcessorBase):
     def __init__(self):
-        # 此時 MediaPipe 已會自動從 /tmp 載入模型，不會再觸發 PermissionError
         self.pose = mp_pose.Pose(
             static_image_mode=False,
             model_complexity=0,
@@ -139,15 +153,15 @@ class PoseVideoProcessor(VideoProcessorBase):
             current_dist_cm = raw_dist_cm * self.calib_ratio
 
             if self.min_target_cm <= current_dist_cm <= self.max_target_cm:
-                status_str = "PASS (合格)"
+                status_str = "合格"
                 line_color = (0, 255, 0)
             elif current_dist_cm < self.min_target_cm:
                 diff_cm = self.min_target_cm - current_dist_cm
-                status_str = f"TOO CLOSE (請拉遠 {diff_cm:.1f} cm)"
+                status_str = f"請拉遠 {diff_cm:.1f} 公分"
                 line_color = (0, 0, 255)
             else:
                 diff_cm = current_dist_cm - self.max_target_cm
-                status_str = f"TOO FAR (請靠近 {diff_cm:.1f} cm)"
+                status_str = f"請靠近 {diff_cm:.1f} 公分"
                 line_color = (0, 0, 255)
 
             cv2.circle(img, (eye_mid_x, eye_mid_y), 8, (0, 255, 255), -1)
@@ -179,6 +193,9 @@ use_3d_world = st.sidebar.toggle("啟用 3D 空間真實距離模式", value=Tru
 calib_ratio = st.sidebar.slider("距離校正倍率 (Calib Ratio)", min_value=0.1, max_value=2.0, value=0.85, step=0.01)
 scale_factor = st.sidebar.slider("2D 像素轉公分比例 (Scale Factor)", min_value=0.01, max_value=0.50, value=0.15, step=0.005)
 
+enable_tts = st.sidebar.toggle("啟用中文語音提示", value=True)
+speech_cooldown = st.sidebar.slider("語音播報間隔 (秒)", min_value=1.0, max_value=5.0, value=2.5, step=0.5)
+
 if st.sidebar.button("重置校正倍率為 1.0"):
     calib_ratio = 1.0
 
@@ -202,10 +219,31 @@ if ctx.video_processor:
 with col2:
     status_metric = st.empty()
     dist_metric = st.empty()
-    
+    tts_slot = st.empty()
+
     if ctx.video_processor:
-        status_metric.metric("檢測狀態", ctx.video_processor.status_str)
-        dist_metric.metric("當前測量距離", f"{ctx.video_processor.current_dist_cm:.1f} cm")
+        # Session State 初始化
+        if "last_speech_time" not in st.session_state:
+            st.session_state.last_speech_time = 0.0
+            st.session_state.last_status = ""
+
+        current_status = ctx.video_processor.status_str
+        current_dist = ctx.video_processor.current_dist_cm
+
+        status_metric.metric("檢測狀態", current_status)
+        dist_metric.metric("當前測量距離", f"{current_dist:.1f} cm")
+
+        # 語音發聲邏輯（加入時間冷卻與狀態變更判斷）
+        now = time.time()
+        is_cooldown_over = (now - st.session_state.last_speech_time) > speech_cooldown
+        is_status_changed = current_status != st.session_state.last_status
+
+        if enable_tts and current_status != "未偵測到人體標記":
+            if is_status_changed or is_cooldown_over:
+                with tts_slot:
+                    speak_js(current_status)
+                st.session_state.last_speech_time = now
+                st.session_state.last_status = current_status
     else:
         status_metric.metric("檢測狀態", "請點擊 START 開啟攝影機")
         dist_metric.metric("當前測量距離", "0.0 cm")
