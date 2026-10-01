@@ -19,7 +19,7 @@ from mediapipe.python.solutions import download_utils
 st.set_page_config(page_title="目檢標準距離檢測系統 (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
-# 2. 修復 MediaPipe Cloud 唯讀權限問題
+# 2. 解決 Streamlit Cloud site-packages 唯讀權限問題
 # -----------------------------------------------------------------------------
 def setup_mediapipe_cloud():
     mp_path = os.path.dirname(mp.__file__)
@@ -48,24 +48,19 @@ def setup_mediapipe_cloud():
     download_utils.download_oss_model = lambda path: None
 
 setup_mediapipe_cloud()
+
 mp_pose = mp.solutions.pose
 
-# -----------------------------------------------------------------------------
-# 強化版 WebRTC RTCConfiguration (加入更多 STUN 節點以防連線失敗)
-# -----------------------------------------------------------------------------
 RTC_CONFIG = RTCConfiguration({
     "iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
         {"urls": ["stun:stun1.l.google.com:19302"]},
-        {"urls": ["stun:stun2.l.google.com:19302"]},
-        {"urls": ["stun:stun3.l.google.com:19302"]},
-        {"urls": ["stun:stun4.l.google.com:19302"]},
-        {"urls": ["stun:global.stun.twilio.com:3478"]}
+        {"urls": ["stun:stun2.l.google.com:19302"]}
     ]
 })
 
 # -----------------------------------------------------------------------------
-# 3. WebRTC 影像處理類別
+# 3. WebRTC 影像處理類別 (改用英文繪製 OpenCV 文字以防止問號)
 # -----------------------------------------------------------------------------
 class PoseVideoProcessor(VideoProcessorBase):
     def __init__(self):
@@ -83,7 +78,8 @@ class PoseVideoProcessor(VideoProcessorBase):
         self.max_target_cm = 32.0
 
         self.current_dist_cm = 0.0
-        self.status_str = "未偵測到人體"
+        self.status_str = "未偵測到人體標記"
+        self.speech_text = ""
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
@@ -93,9 +89,11 @@ class PoseVideoProcessor(VideoProcessorBase):
         rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = self.pose.process(rgb_frame)
 
-        status_str = "未偵測到人體"
+        status_str = "未偵測到人體標記"
+        status_en = "NO TARGET"
         line_color = (200, 200, 200)
         current_dist_cm = 0.0
+        speech_text = ""
 
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
@@ -109,6 +107,8 @@ class PoseVideoProcessor(VideoProcessorBase):
             right_thumb = landmarks[mp_pose.PoseLandmark.RIGHT_THUMB.value]
             thumb_mid_x = int((left_thumb.x + right_thumb.x) / 2 * w)
             thumb_mid_y = int((left_thumb.y + right_thumb.y) / 2 * h)
+
+            raw_dist_cm = 0.0
 
             if self.use_3d_world and results.pose_world_landmarks:
                 wl = results.pose_world_landmarks.landmark
@@ -131,36 +131,51 @@ class PoseVideoProcessor(VideoProcessorBase):
             current_dist_cm = raw_dist_cm * self.calib_ratio
 
             if self.min_target_cm <= current_dist_cm <= self.max_target_cm:
-                status_str = "合格"
+                status_str = "PASS (合格)"
+                status_en = "PASS"
                 line_color = (0, 255, 0)
+                speech_text = "距離合格"
             elif current_dist_cm < self.min_target_cm:
                 diff_cm = self.min_target_cm - current_dist_cm
-                status_str = f"請拉遠 {diff_cm:.1f} 公分"
+                status_str = f"TOO CLOSE (請拉遠 {diff_cm:.1f} cm)"
+                status_en = f"TOO CLOSE (Back {diff_cm:.1f} cm)"
                 line_color = (0, 0, 255)
+                speech_text = f"太近了，請拉遠 {diff_cm:.1f} 公分"
             else:
                 diff_cm = current_dist_cm - self.max_target_cm
-                status_str = f"請靠近 {diff_cm:.1f} 公分"
+                status_str = f"TOO FAR (請靠近 {diff_cm:.1f} cm)"
+                status_en = f"TOO FAR (Closer {diff_cm:.1f} cm)"
                 line_color = (0, 0, 255)
+                speech_text = f"太遠了，請靠近 {diff_cm:.1f} 公分"
 
             cv2.circle(img, (eye_mid_x, eye_mid_y), 8, (0, 255, 255), -1)
             cv2.circle(img, (thumb_mid_x, thumb_mid_y), 8, (255, 255, 0), -1)
             cv2.line(img, (eye_mid_x, eye_mid_y), (thumb_mid_x, thumb_mid_y), line_color, 3)
 
-            cv2.putText(img, f"{current_dist_cm:.1f} cm | {status_str}", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, line_color, 2)
+            cv2.putText(img, "Eye", (eye_mid_x - 30, eye_mid_y - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.putText(img, "Thumb", (thumb_mid_x - 30, thumb_mid_y + 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+            # 使用純英文繪製，徹底解決中文字出現問號的問題
+            cv2.putText(img, f"Dist: {current_dist_cm:.1f} cm | {status_en}", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, line_color, 2)
 
         self.current_dist_cm = current_dist_cm
         self.status_str = status_str
+        self.speech_text = speech_text
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # -----------------------------------------------------------------------------
-# 4. Streamlit UI 介面設定
+# 4. Streamlit UI 與前端語音播報 (Web Speech API)
 # -----------------------------------------------------------------------------
 st.title("📷 目檢標準距離檢測系統 (WebRTC 版)")
 st.caption("標準範圍：30 ~ 32 cm")
 
 st.sidebar.header("⚙️ 系統參數設定")
+
+enable_audio = st.sidebar.checkbox("開啟中文語音提示", value=True)
 use_3d_world = st.sidebar.toggle("啟用 3D 空間真實距離模式", value=True)
 calib_ratio = st.sidebar.slider("距離校正倍率 (Calib Ratio)", min_value=0.1, max_value=2.0, value=0.85, step=0.01)
 scale_factor = st.sidebar.slider("2D 像素轉公分比例 (Scale Factor)", min_value=0.01, max_value=0.50, value=0.15, step=0.005)
@@ -183,68 +198,30 @@ if ctx.video_processor:
     ctx.video_processor.scale_factor = scale_factor
 
 with col2:
-    st.subheader("📊 檢測結果與語音控制")
+    status_metric = st.empty()
+    dist_metric = st.empty()
     
-    # 建立前端 JS 語音引擎 UI 控制框（解決 Autoplay 與 Thread 無法重繪問題）
-    status_val = ctx.video_processor.status_str if ctx.video_processor else "請開啟攝影機"
-    dist_val = f"{ctx.video_processor.current_dist_cm:.1f}" if ctx.video_processor else "0.0"
+    if ctx.video_processor:
+        status_metric.metric("檢測狀態", ctx.video_processor.status_str)
+        dist_metric.metric("當前測量距離", f"{ctx.video_processor.current_dist_cm:.1f} cm")
 
-    tts_html = f"""
-    <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px;">
-        <p style="margin: 0; font-size: 14px; color: #555;">當前檢測狀態：</p>
-        <h3 id="status-text" style="margin: 5px 0 15px 0; color: #1f77b4;">{status_val}</h3>
-        <p style="margin: 0; font-size: 14px; color: #555;">測量距離：</p>
-        <h2 id="dist-text" style="margin: 5px 0 15px 0;">{dist_val} cm</h2>
-        
-        <button id="enable-audio-btn" onclick="toggleAudio()" style="
-            width: 100%;
-            padding: 10px;
-            background-color: #ff4b4b;
-            color: white;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-weight: bold;">
-            🔊 點擊啟用 / 測試語音播報
-        </button>
-        <p id="audio-status" style="font-size: 12px; color: #888; margin-top: 5px; text-align: center;">狀態：語音未授權（請點擊按鈕）</p>
-    </div>
-
-    <script>
-        var audioEnabled = false;
-        var lastText = "";
-        var lastSpeakTime = 0;
-
-        function toggleAudio() {{
-            window.speechSynthesis.cancel();
-            var msg = new SpeechSynthesisUtterance("語音功能已啟用");
-            msg.lang = 'zh-TW';
-            window.speechSynthesis.speak(msg);
+        # 瀏覽器語音播報機制
+        if enable_audio and ctx.video_processor.speech_text:
+            text_to_speak = ctx.video_processor.speech_text
             
-            audioEnabled = true;
-            document.getElementById("audio-status").innerText = "狀態：語音已開啟";
-            document.getElementById("audio-status").style.color = "green";
-            document.getElementById("enable-audio-btn").style.backgroundColor = "#28a745";
-            document.getElementById("enable-audio-btn").innerText = "✅ 語音播報運作中";
-        }}
-
-        function speakText(text) {{
-            if (!audioEnabled || !text || text === "未偵測到人體" || text === "請開啟攝影機") return;
-            var now = Date.now();
-            // 冷卻時間 2.5 秒，避免聲音重疊
-            if (text !== lastText || (now - lastSpeakTime) > 2500) {{
-                window.speechSynthesis.cancel();
-                var msg = new SpeechSynthesisUtterance(text);
+            # 利用 JavaScript 觸發瀏覽器 TTS 發音
+            js_code = f"""
+            <script>
+            if ('speechSynthesis' in window) {{
+                window.speechSynthesis.cancel(); // 停止上一句，確保即時播報
+                var msg = new SpeechSynthesisUtterance("{text_to_speak}");
                 msg.lang = 'zh-TW';
                 msg.rate = 1.0;
                 window.speechSynthesis.speak(msg);
-                lastText = text;
-                lastSpeakTime = now;
             }}
-        }}
-
-        // 自動觸發檢測聲音
-        speakText("{status_val}");
-    </script>
-    """
-    components.html(tts_html, height=280)
+            </script>
+            """
+            components.html(js_code, height=0, width=0)
+    else:
+        status_metric.metric("檢測狀態", "請點擊 START 開啟攝影機")
+        dist_metric.metric("當前測量距離", "0.0 cm")
