@@ -51,17 +51,17 @@ def setup_mediapipe_cloud():
 setup_mediapipe_cloud()
 mp_pose = mp.solutions.pose
 
-# WebRTC STUN / TURN 伺服器配置
+# -----------------------------------------------------------------------------
+# 【方案 A 修改】WebRTC 多組 Google / Twilio STUN 伺服器配置（提高連線成功率）
+# -----------------------------------------------------------------------------
 RTC_CONFIG = RTCConfiguration({
     "iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
         {"urls": ["stun:stun1.l.google.com:19302"]},
-        {"urls": ["stun:global.stun.twilio.com:3478"]},
-        {
-            "urls": ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"],
-            "username": "openrelayproject",
-            "credential": "openrelayproject"
-        }
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+        {"urls": ["stun:stun3.l.google.com:19302"]},
+        {"urls": ["stun:stun4.l.google.com:19302"]},
+        {"urls": ["stun:global.stun.twilio.com:3478"]}
     ]
 })
 
@@ -182,9 +182,13 @@ with col1:
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIG,
         video_processor_factory=PoseVideoProcessor,
-        # 指定 1280x720 廣角解析度，防止視訊裁切人體
+        # 【修改點】將解析度調至 640x480 加快 ICE 握手與串流建立速度
         media_stream_constraints={
-            "video": {"width": {"ideal": 1280}, "height": {"ideal": 720}},
+            "video": {
+                "width": {"ideal": 640},
+                "height": {"ideal": 480},
+                "frameRate": {"ideal": 30}
+            },
             "audio": False
         },
         async_processing=True,
