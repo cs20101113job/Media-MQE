@@ -1,6 +1,7 @@
 import os
 import shutil
 import math
+import time
 import urllib.request
 import cv2
 import numpy as np
@@ -50,23 +51,14 @@ def setup_mediapipe_cloud():
 setup_mediapipe_cloud()
 mp_pose = mp.solutions.pose
 
-# -----------------------------------------------------------------------------
-# 強化版 WebRTC RTCConfiguration (包含多組 STUN 與公共 TURN 轉發伺服器)
-# -----------------------------------------------------------------------------
+# WebRTC STUN / TURN 伺服器配置
 RTC_CONFIG = RTCConfiguration({
     "iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
         {"urls": ["stun:stun1.l.google.com:19302"]},
-        {"urls": ["stun:stun2.l.google.com:19302"]},
         {"urls": ["stun:global.stun.twilio.com:3478"]},
-        # 使用免費公共 TURN 伺服器穿透嚴格防火牆/NAT
         {
             "urls": ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"],
-            "username": "openrelayproject",
-            "credential": "openrelayproject"
-        },
-        {
-            "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
             "username": "openrelayproject",
             "credential": "openrelayproject"
         }
@@ -105,7 +97,6 @@ class PoseVideoProcessor(VideoProcessorBase):
         status_str = "未偵測到人體"
         line_color = (200, 200, 200)
         current_dist_cm = 0.0
-        display_overlay_text = "NO DETECTION"
 
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
@@ -140,7 +131,6 @@ class PoseVideoProcessor(VideoProcessorBase):
 
             current_dist_cm = raw_dist_cm * self.calib_ratio
 
-            # 判定狀態：影像畫面上只繪製英文字串 (避免 OpenCV 產生 ???? 亂碼)
             if self.min_target_cm <= current_dist_cm <= self.max_target_cm:
                 status_str = "合格"
                 display_overlay_text = "PASS"
@@ -162,6 +152,11 @@ class PoseVideoProcessor(VideoProcessorBase):
 
             cv2.putText(img, f"{current_dist_cm:.1f} cm | {display_overlay_text}", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, line_color, 2)
+        else:
+            # 未偵測到人體時顯示提示框
+            cv2.rectangle(img, (30, 30), (w - 30, h - 30), (0, 255, 255), 2)
+            cv2.putText(img, "PLEASE ENTER FRAME (CENTER YOURSELF)", (50, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
         self.current_dist_cm = current_dist_cm
         self.status_str = status_str
@@ -187,7 +182,11 @@ with col1:
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIG,
         video_processor_factory=PoseVideoProcessor,
-        media_stream_constraints={"video": True, "audio": False},
+        # 指定 1280x720 廣角解析度，防止視訊裁切人體
+        media_stream_constraints={
+            "video": {"width": {"ideal": 1280}, "height": {"ideal": 720}},
+            "audio": False
+        },
         async_processing=True,
     )
 
@@ -199,71 +198,59 @@ if ctx.video_processor:
 with col2:
     st.subheader("📊 檢測結果與語音提示")
     
-    current_status = ctx.video_processor.status_str if ctx.video_processor else "請開啟攝影機"
-    current_dist = f"{ctx.video_processor.current_dist_cm:.1f}" if ctx.video_processor else "0.0"
-
-    # 使用純前端 JS 控管語音與顯示，不鎖死 Streamlit 伺服器
-    components.html(f"""
-        <div style="font-family: sans-serif; background-color: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #e9ecef;">
-            <p style="margin: 0; font-size: 13px; color: #6c757d;">當前狀態：</p>
-            <h3 style="margin: 5px 0 15px 0; color: #0d6efd;">{current_status}</h3>
-            
-            <p style="margin: 0; font-size: 13px; color: #6c757d;">測量距離：</p>
-            <h2 style="margin: 5px 0 15px 0; color: #212529;">{current_dist} cm</h2>
-
-            <button id="speech-btn" onclick="initSpeech()" style="
-                width: 100%;
-                padding: 10px;
-                background-color: #198754;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                font-size: 14px;
-                font-weight: bold;
-                cursor: pointer;">
-                🔊 點此解鎖語音功能
-            </button>
-            <p id="speech-info" style="margin: 5px 0 0 0; font-size: 11px; color: #6c757d; text-align: center;">
-                瀏覽器預設阻擋自動發音，開鏡頭前請先點擊一次
-            </p>
-        </div>
-
+    # 點擊啟用語音按鈕
+    components.html("""
+        <button id="speech-btn" onclick="initSpeech()" style="
+            width: 100%;
+            padding: 12px;
+            background-color: #198754;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;">
+            🔊 點此啟用語音提示功能
+        </button>
         <script>
-            var isAudioUnlocked = false;
-            var lastSpokenText = "";
-            var lastSpeakTime = 0;
-
-            function initSpeech() {{
+            function initSpeech() {
                 window.speechSynthesis.cancel();
                 var msg = new SpeechSynthesisUtterance("語音提示功能已啟用");
                 msg.lang = "zh-TW";
                 window.speechSynthesis.speak(msg);
                 
-                isAudioUnlocked = true;
                 var btn = document.getElementById("speech-btn");
                 btn.style.backgroundColor = "#0d6efd";
-                btn.innerText = "✅ 語音播報已就緒";
-                document.getElementById("speech-info").innerText = "檢測狀態改變時將自動進行語音提醒";
-            }}
-
-            function speak(text) {{
-                if (!isAudioUnlocked || !text || text === "未偵測到人體" || text === "請開啟攝影機") return;
-                
-                var now = Date.now();
-                // 狀態改變或冷卻時間滿 2.5 秒時發聲，防止聲音疊加
-                if (text !== lastSpokenText || (now - lastSpeakTime) > 2500) {{
-                    window.speechSynthesis.cancel();
-                    var msg = new SpeechSynthesisUtterance(text);
-                    msg.lang = "zh-TW";
-                    msg.rate = 1.0;
-                    window.speechSynthesis.speak(msg);
-                    
-                    lastSpokenText = text;
-                    lastSpeakTime = now;
-                }}
-            }}
-
-            // 自動嘗試播放當前文字
-            speak("{current_status}");
+                btn.innerText = "✅ 語音功能已就緒";
+            }
         </script>
-    """, height=220)
+    """, height=55)
+
+    # 片段自動刷新區塊（每 1.0 秒自動同步 UI 與驅動語音）
+    @st.fragment(run_every=1.0)
+    def render_realtime_metrics():
+        if ctx.video_processor and ctx.state.playing:
+            status_val = ctx.video_processor.status_str
+            dist_val = ctx.video_processor.current_dist_cm
+
+            st.metric("當前檢測狀態", status_val)
+            st.metric("測量距離", f"{dist_val:.1f} cm")
+
+            # 狀態改變時發聲
+            if status_val not in ["未偵測到人體", "請開啟攝影機"]:
+                safe_text = status_val.replace("'", "\\'")
+                components.html(f"""
+                    <script>
+                        if ('speechSynthesis' in window) {{
+                            window.speechSynthesis.cancel();
+                            var msg = new SpeechSynthesisUtterance('{safe_text}');
+                            msg.lang = 'zh-TW';
+                            window.speechSynthesis.speak(msg);
+                        }}
+                    </script>
+                """, height=0, width=0)
+        else:
+            st.metric("當前檢測狀態", "請開啟攝影機")
+            st.metric("測量距離", "0.0 cm")
+
+    render_realtime_metrics()
