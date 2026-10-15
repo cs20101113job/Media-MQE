@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # 1. 頁面配置
 # -----------------------------------------------------------------------------
-APP_VERSION = 2
+APP_VERSION = 3
 st.set_page_config(page_title=f"Visual Inspection Distance V{APP_VERSION} (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
@@ -34,22 +34,40 @@ def setup_mediapipe_cloud():
     tmp_mp_dir = os.path.join(tmp_root, "mediapipe")
     target_file = os.path.join(tmp_mp_dir, "modules", "pose_landmark", "pose_landmark_lite.tflite")
 
-    if not os.path.exists(target_file):
-        for root, dirs, files in os.walk(mp_path):
-            rel_path = os.path.relpath(root, mp_path)
-            dest_dir = os.path.join(tmp_mp_dir, rel_path) if rel_path != "." else tmp_mp_dir
-            os.makedirs(dest_dir, exist_ok=True)
-            for file in files:
-                src_file = os.path.join(root, file)
-                dst_file = os.path.join(dest_dir, file)
-                if not os.path.exists(dst_file):
-                    try:
-                        os.symlink(src_file, dst_file)
-                    except Exception:
-                        shutil.copy2(src_file, dst_file)
+    for root, dirs, files in os.walk(mp_path):
+        rel_path = os.path.relpath(root, mp_path)
+        dest_dir = os.path.join(tmp_mp_dir, rel_path) if rel_path != "." else tmp_mp_dir
+        os.makedirs(dest_dir, exist_ok=True)
+        for file in files:
+            src_file = os.path.join(root, file)
+            dst_file = os.path.join(dest_dir, file)
+            if not os.path.lexists(dst_file):
+                try:
+                    os.symlink(src_file, dst_file)
+                except OSError:
+                    shutil.copy2(src_file, dst_file)
 
+    os.makedirs(os.path.dirname(target_file), exist_ok=True)
+    if not os.path.isfile(target_file) or os.path.getsize(target_file) == 0:
+        temporary_model = f"{target_file}.download"
         url = "https://storage.googleapis.com/mediapipe-assets/pose_landmark_lite.tflite"
-        urllib.request.urlretrieve(url, target_file)
+        try:
+            urllib.request.urlretrieve(url, temporary_model)
+            os.replace(temporary_model, target_file)
+        except Exception as exc:
+            if os.path.exists(temporary_model):
+                os.remove(temporary_model)
+            raise RuntimeError(f"Failed to download MediaPipe Pose model from {url}") from exc
+
+    if not getattr(resource_util, "_mqe_resource_dir_patched", False):
+        original_set_resource_dir = resource_util.set_resource_dir
+
+        def use_writable_resource_dir(_resource_dir):
+            original_set_resource_dir(tmp_root)
+
+        # SolutionBase resets the resource root to the read-only package directory.
+        resource_util.set_resource_dir = use_writable_resource_dir
+        resource_util._mqe_resource_dir_patched = True
 
     resource_util.set_resource_dir(tmp_root)
     download_utils.download_oss_model = lambda path: None
