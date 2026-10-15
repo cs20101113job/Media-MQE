@@ -3,9 +3,7 @@ import os
 import shutil
 import math
 import time
-import logging
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 import streamlit as st
@@ -17,12 +15,11 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfigurati
 from mediapipe.python._framework_bindings import resource_util
 from mediapipe.python.solutions import download_utils
 
-logger = logging.getLogger(__name__)
-
 # -----------------------------------------------------------------------------
 # 1. 頁面配置
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="Visual Inspection Distance V2 (WebRTC版)", layout="wide")
+APP_VERSION = 1
+st.set_page_config(page_title=f"Visual Inspection Distance V{APP_VERSION} (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
 # 2. 修復 MediaPipe Cloud 唯讀權限問題
@@ -79,7 +76,13 @@ RTC_CONFIG = RTCConfiguration({
 # -----------------------------------------------------------------------------
 class PoseVideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self._pose = None
+        self.pose = mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=0,
+            smooth_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
         self.use_3d_world = True
         self.calib_ratio = 0.85
         self.scale_factor = 0.15
@@ -89,64 +92,21 @@ class PoseVideoProcessor(VideoProcessorBase):
         self.current_dist_cm = 0.0
         self.status_str = "No detection human body"
         self.status_category = "NO_HUMAN"
-        self._inference_executor = ThreadPoolExecutor(max_workers=1)
-        self._inference_future = None
-        self._latest_results = None
-
-    def _run_inference(self, rgb_frame: np.ndarray):
-        if self._pose is None:
-            self._pose = mp_pose.Pose(
-                static_image_mode=False,
-                model_complexity=0,
-                smooth_landmarks=True,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5
-            )
-        return self._pose.process(rgb_frame)
-
-    def _close_pose(self):
-        if self._pose is not None:
-            self._pose.close()
-            self._pose = None
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        return self._process_frame(frame)
-
-    async def recv_queued(self, frames: list[av.VideoFrame]) -> list[av.VideoFrame]:
-        if not frames:
-            return []
-
-        return [self._process_frame(frames[-1])]
-
-    def _process_frame(self, frame: av.VideoFrame) -> av.VideoFrame:
-        if self._inference_future is not None and self._inference_future.done():
-            completed_future = self._inference_future
-            self._inference_future = None
-            try:
-                self._latest_results = completed_future.result()
-            except Exception:
-                self._latest_results = None
-                logger.exception("Pose inference failed; retrying with the next frame")
-
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
-        if self._inference_future is None:
-            rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            self._inference_future = self._inference_executor.submit(
-                self._run_inference, rgb_frame
-            )
-
-        return self._render_frame(img, self._latest_results)
-
-    def _render_frame(self, img: np.ndarray, results) -> av.VideoFrame:
         h, w, _ = img.shape
+        
+        rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = self.pose.process(rgb_frame)
 
         status_str = "No detection human body"
         status_category = "NO_HUMAN"
         line_color = (200, 200, 200)
         current_dist_cm = 0.0
 
-        if results is not None and results.pose_landmarks:
+        if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
 
             left_eye = landmarks[mp_pose.PoseLandmark.LEFT_EYE.value]
@@ -214,14 +174,10 @@ class PoseVideoProcessor(VideoProcessorBase):
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-    def on_ended(self):
-        self._inference_executor.submit(self._close_pose).result()
-        self._inference_executor.shutdown(wait=True, cancel_futures=True)
-
 # -----------------------------------------------------------------------------
 # 4. Streamlit UI 介面設定
 # -----------------------------------------------------------------------------
-st.title("📷 Visual Inspection Distance VI (WebRTC Version)")
+st.title(f"📷 Visual Inspection Distance V{APP_VERSION} (WebRTC Version)")
 st.caption("Standard Range: 30 ~ 32 cm")
 
 # Session State 初始化
@@ -278,43 +234,63 @@ with col2:
             🔊 Click here to enable voice prompt
         </button>
         <script>
+            var synth = 'speechSynthesis' in window ? window.speechSynthesis : null;
+            var btn = document.getElementById("speech-btn");
+            var selectedVoice = null;
+            var voiceTimeout;
+
+            function loadEnglishVoice() {
+                if (!synth || selectedVoice) return;
+
+                var englishVoices = synth.getVoices().filter(v =>
+                    v.lang && v.lang.toLowerCase().startsWith('en')
+                );
+                if (englishVoices.length === 0) return;
+
+                var preferredNames = [
+                    'natural', 'enhanced', 'premium', 'ava', 'jenny',
+                    'samantha', 'zira', 'google us english'
+                ];
+                selectedVoice = englishVoices.find(v =>
+                    preferredNames.some(name => v.name.toLowerCase().includes(name))
+                ) || englishVoices.find(v => v.lang.toLowerCase() === 'en-us') || englishVoices[0];
+
+                clearTimeout(voiceTimeout);
+                synth.removeEventListener('voiceschanged', loadEnglishVoice);
+                btn.disabled = false;
+                btn.innerText = "🔊 Click here to enable voice prompt";
+            }
+
             function initSpeech() {
-                if ('speechSynthesis' in window) {
-                    var synth = window.speechSynthesis;
-                    synth.cancel();
-                    var msg = new SpeechSynthesisUtterance("Enable Voice prompt function");
-                    msg.lang = "en-US";
-                    msg.pitch = 1.0; // 必須為 1.0，避免觸發 Chrome 音頻重採樣變聲失真
-                    msg.rate = 1.0;
+                if (!synth || !selectedVoice) return;
 
-                    var btn = document.getElementById("speech-btn");
-                    var started = false;
-                    function speakWithSelectedVoice() {
-                        if (started) return;
+                synth.cancel();
+                var msg = new SpeechSynthesisUtterance("Voice prompt enabled.");
+                msg.voice = selectedVoice;
+                msg.lang = selectedVoice.lang;
+                msg.pitch = 1.0;
+                msg.rate = 1.0;
+                synth.speak(msg);
+                btn.style.backgroundColor = "#0d6efd";
+                btn.innerText = "✅ Voice prompt is ready";
+            }
 
-                        var voices = synth.getVoices();
-                        var englishVoices = voices.filter(v => v.lang.toLowerCase().startsWith('en'));
-                        if (englishVoices.length === 0) return;
-
-                        var preferredNames = [
-                            'natural', 'enhanced', 'premium', 'ava', 'jenny',
-                            'samantha', 'zira', 'google us english'
-                        ];
-                        var selectedVoice = englishVoices.find(v =>
-                            preferredNames.some(name => v.name.toLowerCase().includes(name))
-                        ) || englishVoices.find(v => v.lang.toLowerCase() === 'en-us') || englishVoices[0];
-                        msg.voice = selectedVoice;
-                        msg.lang = selectedVoice.lang;
-                        started = true;
-                        synth.removeEventListener('voiceschanged', speakWithSelectedVoice);
-                        synth.speak(msg);
-                        btn.style.backgroundColor = "#0d6efd";
-                        btn.innerText = "✅ Voice prompt is ready";
-                    }
-
-                    synth.addEventListener('voiceschanged', speakWithSelectedVoice);
-                    speakWithSelectedVoice();
-                }
+            if (synth) {
+                btn.disabled = true;
+                btn.innerText = "⌛ Loading English voice...";
+                synth.addEventListener('voiceschanged', loadEnglishVoice);
+                voiceTimeout = setTimeout(function() {
+                    if (selectedVoice) return;
+                    synth.removeEventListener('voiceschanged', loadEnglishVoice);
+                    btn.disabled = true;
+                    btn.style.backgroundColor = "#dc3545";
+                    btn.innerText = "❌ No English voice available";
+                }, 5000);
+                loadEnglishVoice();
+            } else {
+                btn.disabled = true;
+                btn.style.backgroundColor = "#dc3545";
+                btn.innerText = "❌ Speech synthesis is unavailable";
             }
         </script>
     """, height=55)
@@ -362,35 +338,35 @@ with col2:
                             <script>
                                 if ('speechSynthesis' in window) {{
                                     window.speechSynthesis.cancel();
-                                    var synth = window.speechSynthesis;
                                     var msg = new SpeechSynthesisUtterance('{speech_text}');
                                     msg.lang = 'en-US';
                                     msg.pitch = 1.0; // 保持 1.0，防止 WebRTC 採樣率拉伸失真
                                     msg.rate = 1.0;
-                                    var started = false;
 
                                     function speakWithSelectedVoice() {{
-                                        if (started) return;
                                         var voices = window.speechSynthesis.getVoices();
-                                        var englishVoices = voices.filter(v => v.lang.toLowerCase().startsWith('en'));
-                                        if (englishVoices.length === 0) return;
+                                        var selectedVoice = voices.find(v => 
+                                            v.lang.startsWith('en') && (
+                                                v.name.includes('Zira') || 
+                                                v.name.includes('Jenny') || 
+                                                v.name.includes('Google US English') ||
+                                                v.name.includes('Samantha') || 
+                                                v.name.includes('Natural')
+                                            )
+                                        ) || voices.find(v => v.lang.startsWith('en'));
 
-                                        var preferredNames = [
-                                            'natural', 'enhanced', 'premium', 'ava', 'jenny',
-                                            'samantha', 'zira', 'google us english'
-                                        ];
-                                        var selectedVoice = englishVoices.find(v =>
-                                            preferredNames.some(name => v.name.toLowerCase().includes(name))
-                                        ) || englishVoices.find(v => v.lang.toLowerCase() === 'en-us') || englishVoices[0];
-                                        msg.voice = selectedVoice;
-                                        msg.lang = selectedVoice.lang;
-                                        started = true;
-                                        synth.removeEventListener('voiceschanged', speakWithSelectedVoice);
+                                        if (selectedVoice) {{
+                                            msg.voice = selectedVoice;
+                                        }}
                                         window.speechSynthesis.speak(msg);
                                     }}
 
-                                    synth.addEventListener('voiceschanged', speakWithSelectedVoice);
-                                    speakWithSelectedVoice();
+                                    var voices = window.speechSynthesis.getVoices();
+                                    if (voices.length > 0) {{
+                                        speakWithSelectedVoice();
+                                    }} else {{
+                                        window.speechSynthesis.onvoiceschanged = speakWithSelectedVoice;
+                                    }}
                                 }}
                             </script>
                         """, height=0, width=0)
