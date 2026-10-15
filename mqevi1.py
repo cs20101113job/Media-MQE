@@ -1,0 +1,384 @@
+""" English version of Visual Inspection Distance (WebRTC) using MediaPipe Pose and Streamlit WebRTC """
+import os
+import shutil
+import math
+import time
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+import cv2
+import numpy as np
+import streamlit as st
+import streamlit.components.v1 as components
+import mediapipe as mp
+import av
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
+
+from mediapipe.python._framework_bindings import resource_util
+from mediapipe.python.solutions import download_utils
+
+# -----------------------------------------------------------------------------
+# 1. 頁面配置
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="Visual Inspection Distance (WebRTC版)", layout="wide")
+
+# -----------------------------------------------------------------------------
+# 2. 修復 MediaPipe Cloud 唯讀權限問題
+# -----------------------------------------------------------------------------
+def setup_mediapipe_cloud():
+    mp_path = os.path.dirname(mp.__file__)
+    tmp_root = "/tmp/mediapipe_root"
+    tmp_mp_dir = os.path.join(tmp_root, "mediapipe")
+    target_file = os.path.join(tmp_mp_dir, "modules", "pose_landmark", "pose_landmark_lite.tflite")
+
+    if not os.path.exists(target_file):
+        for root, dirs, files in os.walk(mp_path):
+            rel_path = os.path.relpath(root, mp_path)
+            dest_dir = os.path.join(tmp_mp_dir, rel_path) if rel_path != "." else tmp_mp_dir
+            os.makedirs(dest_dir, exist_ok=True)
+            for file in files:
+                src_file = os.path.join(root, file)
+                dst_file = os.path.join(dest_dir, file)
+                if not os.path.exists(dst_file):
+                    try:
+                        os.symlink(src_file, dst_file)
+                    except Exception:
+                        shutil.copy2(src_file, dst_file)
+
+        url = "https://storage.googleapis.com/mediapipe-assets/pose_landmark_lite.tflite"
+        urllib.request.urlretrieve(url, target_file)
+
+    resource_util.set_resource_dir(tmp_root)
+    download_utils.download_oss_model = lambda path: None
+
+setup_mediapipe_cloud()
+mp_pose = mp.solutions.pose
+
+# -----------------------------------------------------------------------------
+# TURN 伺服器設定
+# -----------------------------------------------------------------------------
+RTC_CONFIG = RTCConfiguration({
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {
+            "urls": [
+                "turn:openrelay.metered.ca:80",
+                "turn:openrelay.metered.ca:443",
+                "turns:openrelay.metered.ca:443?transport=tcp"
+            ],
+            "username": "9736e7593c3eaefcd10e0afb",
+            "credential": "0WH5wjRGFhfv3KxS"
+        }
+    ]
+})
+
+# -----------------------------------------------------------------------------
+# 3. WebRTC 影像處理類別
+# -----------------------------------------------------------------------------
+class PoseVideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.pose = mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=0,
+            smooth_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        self.use_3d_world = True
+        self.calib_ratio = 0.85
+        self.scale_factor = 0.15
+        self.min_target_cm = 30.0
+        self.max_target_cm = 32.0
+
+        self.current_dist_cm = 0.0
+        self.status_str = "No detection human body"
+        self.status_category = "NO_HUMAN"
+        self._inference_executor = ThreadPoolExecutor(max_workers=1)
+        self._inference_future = None
+        self._latest_results = None
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        return self._process_frame(frame)
+
+    async def recv_queued(self, frames: list[av.VideoFrame]) -> list[av.VideoFrame]:
+        if not frames:
+            return []
+
+        return [self._process_frame(frames[-1])]
+
+    def _process_frame(self, frame: av.VideoFrame) -> av.VideoFrame:
+        if self._inference_future is not None and self._inference_future.done():
+            self._latest_results = self._inference_future.result()
+            self._inference_future = None
+
+        img = frame.to_ndarray(format="bgr24")
+        img = cv2.flip(img, 1)
+        if self._inference_future is None:
+            rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            self._inference_future = self._inference_executor.submit(
+                self.pose.process, rgb_frame
+            )
+
+        return self._render_frame(img, self._latest_results)
+
+    def _render_frame(self, img: np.ndarray, results) -> av.VideoFrame:
+        h, w, _ = img.shape
+
+        status_str = "No detection human body"
+        status_category = "NO_HUMAN"
+        line_color = (200, 200, 200)
+        current_dist_cm = 0.0
+
+        if results is not None and results.pose_landmarks:
+            landmarks = results.pose_landmarks.landmark
+
+            left_eye = landmarks[mp_pose.PoseLandmark.LEFT_EYE.value]
+            right_eye = landmarks[mp_pose.PoseLandmark.RIGHT_EYE.value]
+            eye_mid_x = int((left_eye.x + right_eye.x) / 2 * w)
+            eye_mid_y = int((left_eye.y + right_eye.y) / 2 * h)
+
+            left_thumb = landmarks[mp_pose.PoseLandmark.LEFT_THUMB.value]
+            right_thumb = landmarks[mp_pose.PoseLandmark.RIGHT_THUMB.value]
+            thumb_mid_x = int((left_thumb.x + right_thumb.x) / 2 * w)
+            thumb_mid_y = int((left_thumb.y + right_thumb.y) / 2 * h)
+
+            if self.use_3d_world and results.pose_world_landmarks:
+                wl = results.pose_world_landmarks.landmark
+                l_eye_w, r_eye_w = wl[mp_pose.PoseLandmark.LEFT_EYE.value], wl[mp_pose.PoseLandmark.RIGHT_EYE.value]
+                l_thumb_w, r_thumb_w = wl[mp_pose.PoseLandmark.LEFT_THUMB.value], wl[mp_pose.PoseLandmark.RIGHT_THUMB.value]
+
+                eye_w_mid = ((l_eye_w.x + r_eye_w.x) / 2, (l_eye_w.y + r_eye_w.y) / 2, (l_eye_w.z + r_eye_w.z) / 2)
+                thumb_w_mid = ((l_thumb_w.x + r_thumb_w.x) / 2, (l_thumb_w.y + r_thumb_w.y) / 2, (l_thumb_w.z + r_thumb_w.z) / 2)
+
+                dist_meters = math.sqrt(
+                    (eye_w_mid[0] - thumb_w_mid[0])**2 +
+                    (eye_w_mid[1] - thumb_w_mid[1])**2 +
+                    (eye_w_mid[2] - thumb_w_mid[2])**2
+                )
+                raw_dist_cm = dist_meters * 100.0
+            else:
+                pixel_dist = math.hypot(eye_mid_x - thumb_mid_x, eye_mid_y - thumb_mid_y)
+                raw_dist_cm = pixel_dist * self.scale_factor
+
+            current_dist_cm = raw_dist_cm * self.calib_ratio
+
+            if self.min_target_cm <= current_dist_cm <= self.max_target_cm:
+                status_str = "Pass"
+                status_category = "PASS"
+                display_overlay_text = "PASS"
+                line_color = (0, 255, 0)
+            elif current_dist_cm < self.min_target_cm:
+                diff_cm = self.min_target_cm - current_dist_cm
+                status_str = f"Please move further {diff_cm:.1f} cm"
+                status_category = "TOO_CLOSE"
+                display_overlay_text = f"TOO CLOSE (-{diff_cm:.1f}cm)"
+                line_color = (0, 0, 255)
+            else:
+                diff_cm = current_dist_cm - self.max_target_cm
+                status_str = f"Please move closer {diff_cm:.1f} cm"
+                status_category = "TOO_FAR"
+                display_overlay_text = f"TOO FAR (+{diff_cm:.1f}cm)"
+                line_color = (0, 0, 255)
+
+            cv2.circle(img, (eye_mid_x, eye_mid_y), 8, (0, 255, 255), -1)
+            cv2.circle(img, (thumb_mid_x, thumb_mid_y), 8, (255, 255, 0), -1)
+            cv2.line(img, (eye_mid_x, eye_mid_y), (thumb_mid_x, thumb_mid_y), line_color, 3)
+
+            cv2.putText(img, f"{current_dist_cm:.1f} cm | {display_overlay_text}", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, line_color, 2)
+        else:
+            cv2.rectangle(img, (30, 30), (w - 30, h - 30), (0, 255, 255), 2)
+            cv2.putText(img, "PLEASE ENTER FRAME (CENTER YOURSELF)", (50, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+        self.current_dist_cm = current_dist_cm
+        self.status_str = status_str
+        self.status_category = status_category
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+    def on_ended(self):
+        self._inference_executor.shutdown(wait=True, cancel_futures=True)
+        self.pose.close()
+
+# -----------------------------------------------------------------------------
+# 4. Streamlit UI 介面設定
+# -----------------------------------------------------------------------------
+st.title("📷 Visual Inspection Distance (WebRTC Version)")
+st.caption("Standard Range: 30 ~ 32 cm")
+
+# Session State 初始化
+if "last_speech_category" not in st.session_state:
+    st.session_state.last_speech_category = ""
+if "last_speech_time" not in st.session_state:
+    st.session_state.last_speech_time = 0.0
+
+st.sidebar.header("⚙️ System Parameters")
+use_3d_world = st.sidebar.toggle("Enable 3D World Real-distance Mode", value=True)
+calib_ratio = st.sidebar.slider("Distance Calibration Ratio", min_value=0.1, max_value=2.0, value=0.85, step=0.01)
+scale_factor = st.sidebar.slider("2D Pixels to Centimeters Ratio (Scale Factor)", min_value=0.01, max_value=0.50, value=0.15, step=0.005)
+
+# 調整欄位比例防擠壓
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    ctx = webrtc_streamer(
+        key="pose-distance-detector",
+        mode=WebRtcMode.SENDRECV,
+        rtc_configuration=RTC_CONFIG,
+        video_processor_factory=PoseVideoProcessor,
+        media_stream_constraints={
+            "video": {
+                "width": {"ideal": 640},
+                "height": {"ideal": 480},
+                "frameRate": {"ideal": 30}
+            },
+            "audio": False
+        },
+        async_processing=True,
+    )
+
+if ctx.video_processor:
+    ctx.video_processor.use_3d_world = use_3d_world
+    ctx.video_processor.calib_ratio = calib_ratio
+    ctx.video_processor.scale_factor = scale_factor
+
+with col2:
+    st.subheader("📊 Inspection result and voice prompt")
+    
+    # 啟用語音按鈕（移除 pitch 變速，鎖定標準高畫質人聲）
+    components.html("""
+        <button id="speech-btn" onclick="initSpeech()" style="
+            width: 100%;
+            padding: 12px;
+            background-color: #198754;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;">
+            🔊 Click here to enable voice prompt
+        </button>
+        <script>
+            function initSpeech() {
+                if ('speechSynthesis' in window) {
+                    window.speechSynthesis.cancel();
+                    var msg = new SpeechSynthesisUtterance("Enable Voice prompt function");
+                    msg.lang = "en-US";
+                    msg.pitch = 1.0; // 必須為 1.0，避免觸發 Chrome 音頻重採樣變聲失真
+                    msg.rate = 1.0;
+
+                    var voices = window.speechSynthesis.getVoices();
+                    var preferredVoice = voices.find(v => v.lang.startsWith('en') && (
+                        v.name.includes('Zira') || 
+                        v.name.includes('Jenny') || 
+                        v.name.includes('Google US English') ||
+                        v.name.includes('Samantha') || 
+                        v.name.includes('Natural')
+                    ));
+                    if (preferredVoice) msg.voice = preferredVoice;
+
+                    window.speechSynthesis.speak(msg);
+                    
+                    var btn = document.getElementById("speech-btn");
+                    btn.style.backgroundColor = "#0d6efd";
+                    btn.innerText = "✅ Voice prompt is ready";
+                }
+            }
+        </script>
+    """, height=55)
+
+    # 每秒刷新並判斷語音觸發與顯示數值
+    @st.fragment(run_every=1.0)
+    def render_realtime_metrics():
+        if ctx.video_processor and ctx.state.playing:
+            status_val = ctx.video_processor.status_str
+            category_val = getattr(ctx.video_processor, "status_category", "NO_HUMAN")
+            dist_val = ctx.video_processor.current_dist_cm
+
+            # 卡片式佈局：自動換行防止文字被剪切截斷
+            st.markdown(f"""
+                <div style="background-color: #262730; padding: 12px; border-radius: 6px; margin-top: 10px; border: 1px solid #464855;">
+                    <div style="font-size: 13px; color: #a3a8b8; margin-bottom: 4px;">Current Inspection Status</div>
+                    <div style="font-size: 18px; font-weight: bold; color: #ffffff; word-break: break-word; line-height: 1.3;">{status_val}</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown(f"""
+                <div style="background-color: #262730; padding: 12px; border-radius: 6px; margin-top: 10px; border: 1px solid #464855;">
+                    <div style="font-size: 13px; color: #a3a8b8; margin-bottom: 4px;">Measurement Distance</div>
+                    <div style="font-size: 22px; font-weight: bold; color: #0dcaf0;">{dist_val:.1f} cm</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+            current_time = time.time()
+            time_passed = current_time - st.session_state.last_speech_time
+
+            if category_val != "NO_HUMAN":
+                if category_val != st.session_state.last_speech_category or time_passed >= 3.0:
+                    st.session_state.last_speech_category = category_val
+                    st.session_state.last_speech_time = current_time
+
+                    speech_text_map = {
+                        "PASS": "Pass",
+                        "TOO_CLOSE": "Please move back",
+                        "TOO_FAR": "Please move closer"
+                    }
+                    speech_text = speech_text_map.get(category_val, "")
+
+                    if speech_text:
+                        components.html(f"""
+                            <script>
+                                if ('speechSynthesis' in window) {{
+                                    window.speechSynthesis.cancel();
+                                    var msg = new SpeechSynthesisUtterance('{speech_text}');
+                                    msg.lang = 'en-US';
+                                    msg.pitch = 1.0; // 保持 1.0，防止 WebRTC 採樣率拉伸失真
+                                    msg.rate = 1.0;
+
+                                    function speakWithSelectedVoice() {{
+                                        var voices = window.speechSynthesis.getVoices();
+                                        var selectedVoice = voices.find(v => 
+                                            v.lang.startsWith('en') && (
+                                                v.name.includes('Zira') || 
+                                                v.name.includes('Jenny') || 
+                                                v.name.includes('Google US English') ||
+                                                v.name.includes('Samantha') || 
+                                                v.name.includes('Natural')
+                                            )
+                                        ) || voices.find(v => v.lang.startsWith('en'));
+
+                                        if (selectedVoice) {{
+                                            msg.voice = selectedVoice;
+                                        }}
+                                        window.speechSynthesis.speak(msg);
+                                    }}
+
+                                    var voices = window.speechSynthesis.getVoices();
+                                    if (voices.length > 0) {{
+                                        speakWithSelectedVoice();
+                                    }} else {{
+                                        window.speechSynthesis.onvoiceschanged = speakWithSelectedVoice;
+                                    }}
+                                }}
+                            </script>
+                        """, height=0, width=0)
+        else:
+            st.markdown("""
+                <div style="background-color: #262730; padding: 12px; border-radius: 6px; margin-top: 10px; border: 1px solid #464855;">
+                    <div style="font-size: 13px; color: #a3a8b8; margin-bottom: 4px;">Current Inspection Status</div>
+                    <div style="font-size: 18px; font-weight: bold; color: #ffffff; word-break: break-word; line-height: 1.3;">Please turn on the camera</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("""
+                <div style="background-color: #262730; padding: 12px; border-radius: 6px; margin-top: 10px; border: 1px solid #464855;">
+                    <div style="font-size: 13px; color: #a3a8b8; margin-bottom: 4px;">Measurement Distance</div>
+                    <div style="font-size: 22px; font-weight: bold; color: #0dcaf0;">0.0 cm</div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            st.session_state.last_speech_category = ""
+            st.session_state.last_speech_time = 0.0
+
+    render_realtime_metrics()
