@@ -262,27 +262,41 @@ with col2:
         <script>
             function initSpeech() {
                 if ('speechSynthesis' in window) {
-                    window.speechSynthesis.cancel();
+                    var synth = window.speechSynthesis;
+                    synth.cancel();
                     var msg = new SpeechSynthesisUtterance("Enable Voice prompt function");
                     msg.lang = "en-US";
                     msg.pitch = 1.0; // 必須為 1.0，避免觸發 Chrome 音頻重採樣變聲失真
                     msg.rate = 1.0;
 
-                    var voices = window.speechSynthesis.getVoices();
-                    var preferredVoice = voices.find(v => v.lang.startsWith('en') && (
-                        v.name.includes('Zira') || 
-                        v.name.includes('Jenny') || 
-                        v.name.includes('Google US English') ||
-                        v.name.includes('Samantha') || 
-                        v.name.includes('Natural')
-                    ));
-                    if (preferredVoice) msg.voice = preferredVoice;
-
-                    window.speechSynthesis.speak(msg);
-                    
                     var btn = document.getElementById("speech-btn");
-                    btn.style.backgroundColor = "#0d6efd";
-                    btn.innerText = "✅ Voice prompt is ready";
+                    var started = false;
+                    function speakWithSelectedVoice() {
+                        if (started) return;
+
+                        var voices = synth.getVoices();
+                        if (voices.length === 0) return;
+
+                        var selectedVoice = voices.find(v =>
+                            v.lang.startsWith('en') && (
+                                v.name.includes('Zira') ||
+                                v.name.includes('Jenny') ||
+                                v.name.includes('Google US English') ||
+                                v.name.includes('Samantha') ||
+                                v.name.includes('Natural')
+                            )
+                        ) || voices.find(v => v.lang.startsWith('en'));
+
+                        if (selectedVoice) msg.voice = selectedVoice;
+                        started = true;
+                        synth.removeEventListener('voiceschanged', speakWithSelectedVoice);
+                        synth.speak(msg);
+                        btn.style.backgroundColor = "#0d6efd";
+                        btn.innerText = "✅ Voice prompt is ready";
+                    }
+
+                    synth.addEventListener('voiceschanged', speakWithSelectedVoice);
+                    speakWithSelectedVoice();
                 }
             }
         </script>
