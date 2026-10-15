@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # 1. 頁面配置
 # -----------------------------------------------------------------------------
-APP_VERSION = 3
+APP_VERSION = 2
 st.set_page_config(page_title=f"Visual Inspection Distance V{APP_VERSION} (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
@@ -85,6 +85,7 @@ class PoseVideoProcessor(VideoProcessorBase):
         self._inference_future = None
         self._latest_results = None
         self.inference_error = None
+        self._next_inference_time = 0.0
         self._executor_shutdown = False
         self.use_3d_world = True
         self.calib_ratio = 0.85
@@ -105,7 +106,13 @@ class PoseVideoProcessor(VideoProcessorBase):
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5
             )
-        return self.pose.process(rgb_frame)
+
+        try:
+            return self.pose.process(rgb_frame)
+        except Exception:
+            self.pose.close()
+            self.pose = None
+            raise
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         return self._process_frame(frame)
@@ -125,12 +132,24 @@ class PoseVideoProcessor(VideoProcessorBase):
             except Exception as exc:
                 self._latest_results = None
                 self.inference_error = f"{type(exc).__name__}: {exc}"
-                logger.exception("Pose inference failed; retrying with the next frame")
+                self._next_inference_time = time.monotonic() + 1.0
+                logger.exception("Pose inference failed; retrying with a new Pose instance")
 
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
-        if self._inference_future is None:
-            rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        if (
+            self._inference_future is None
+            and not self._executor_shutdown
+            and time.monotonic() >= self._next_inference_time
+        ):
+            inference_img = img
+            height, width = img.shape[:2]
+            scale = min(1.0, 480 / max(height, width))
+            if scale < 1.0:
+                inference_img = cv2.resize(
+                    img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA
+                )
+            rgb_frame = cv2.cvtColor(inference_img, cv2.COLOR_BGR2RGB)
             self._inference_future = self._inference_executor.submit(
                 self._run_inference, rgb_frame
             )
@@ -145,11 +164,11 @@ class PoseVideoProcessor(VideoProcessorBase):
         current_dist_cm = 0.0
 
         if self.inference_error:
-            status_str = "Pose inference error (see server logs)"
+            status_str = f"Pose inference error; retrying ({self.inference_error})"
             status_category = "INFERENCE_ERROR"
             line_color = (0, 0, 255)
-            cv2.putText(img, "POSE INFERENCE ERROR", (30, 70),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, line_color, 2)
+            cv2.putText(img, "POSE INFERENCE ERROR - RETRYING", (30, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, line_color, 2)
         elif results is not None and results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
 
@@ -363,7 +382,7 @@ with col2:
             inference_error = getattr(ctx.video_processor, "inference_error", None)
 
             if inference_error:
-                st.error(f"Pose detection failed: {inference_error}")
+                st.error(f"Pose detection failed; retrying: {inference_error}")
 
             # 卡片式佈局：自動換行防止文字被剪切截斷
             st.markdown(f"""
