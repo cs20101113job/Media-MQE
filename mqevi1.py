@@ -3,6 +3,7 @@ import os
 import shutil
 import math
 import time
+import logging
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 import cv2
@@ -16,10 +17,12 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfigurati
 from mediapipe.python._framework_bindings import resource_util
 from mediapipe.python.solutions import download_utils
 
+logger = logging.getLogger(__name__)
+
 # -----------------------------------------------------------------------------
 # 1. 頁面配置
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="Visual Inspection Distance (WebRTC版)", layout="wide")
+st.set_page_config(page_title="Visual Inspection Distance VI (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
 # 2. 修復 MediaPipe Cloud 唯讀權限問題
@@ -107,8 +110,13 @@ class PoseVideoProcessor(VideoProcessorBase):
 
     def _process_frame(self, frame: av.VideoFrame) -> av.VideoFrame:
         if self._inference_future is not None and self._inference_future.done():
-            self._latest_results = self._inference_future.result()
+            completed_future = self._inference_future
             self._inference_future = None
+            try:
+                self._latest_results = completed_future.result()
+            except Exception:
+                self._latest_results = None
+                logger.exception("Pose inference failed; retrying with the next frame")
 
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
@@ -203,7 +211,7 @@ class PoseVideoProcessor(VideoProcessorBase):
 # -----------------------------------------------------------------------------
 # 4. Streamlit UI 介面設定
 # -----------------------------------------------------------------------------
-st.title("📷 Visual Inspection Distance (WebRTC Version)")
+st.title("📷 Visual Inspection Distance VI (WebRTC Version)")
 st.caption("Standard Range: 30 ~ 32 cm")
 
 # Session State 初始化
@@ -275,19 +283,18 @@ with col2:
                         if (started) return;
 
                         var voices = synth.getVoices();
-                        if (voices.length === 0) return;
+                        var englishVoices = voices.filter(v => v.lang.toLowerCase().startsWith('en'));
+                        if (englishVoices.length === 0) return;
 
-                        var selectedVoice = voices.find(v =>
-                            v.lang.startsWith('en') && (
-                                v.name.includes('Zira') ||
-                                v.name.includes('Jenny') ||
-                                v.name.includes('Google US English') ||
-                                v.name.includes('Samantha') ||
-                                v.name.includes('Natural')
-                            )
-                        ) || voices.find(v => v.lang.startsWith('en'));
-
-                        if (selectedVoice) msg.voice = selectedVoice;
+                        var preferredNames = [
+                            'natural', 'enhanced', 'premium', 'ava', 'jenny',
+                            'samantha', 'zira', 'google us english'
+                        ];
+                        var selectedVoice = englishVoices.find(v =>
+                            preferredNames.some(name => v.name.toLowerCase().includes(name))
+                        ) || englishVoices.find(v => v.lang.toLowerCase() === 'en-us') || englishVoices[0];
+                        msg.voice = selectedVoice;
+                        msg.lang = selectedVoice.lang;
                         started = true;
                         synth.removeEventListener('voiceschanged', speakWithSelectedVoice);
                         synth.speak(msg);
@@ -345,35 +352,35 @@ with col2:
                             <script>
                                 if ('speechSynthesis' in window) {{
                                     window.speechSynthesis.cancel();
+                                    var synth = window.speechSynthesis;
                                     var msg = new SpeechSynthesisUtterance('{speech_text}');
                                     msg.lang = 'en-US';
                                     msg.pitch = 1.0; // 保持 1.0，防止 WebRTC 採樣率拉伸失真
                                     msg.rate = 1.0;
+                                    var started = false;
 
                                     function speakWithSelectedVoice() {{
+                                        if (started) return;
                                         var voices = window.speechSynthesis.getVoices();
-                                        var selectedVoice = voices.find(v => 
-                                            v.lang.startsWith('en') && (
-                                                v.name.includes('Zira') || 
-                                                v.name.includes('Jenny') || 
-                                                v.name.includes('Google US English') ||
-                                                v.name.includes('Samantha') || 
-                                                v.name.includes('Natural')
-                                            )
-                                        ) || voices.find(v => v.lang.startsWith('en'));
+                                        var englishVoices = voices.filter(v => v.lang.toLowerCase().startsWith('en'));
+                                        if (englishVoices.length === 0) return;
 
-                                        if (selectedVoice) {{
-                                            msg.voice = selectedVoice;
-                                        }}
+                                        var preferredNames = [
+                                            'natural', 'enhanced', 'premium', 'ava', 'jenny',
+                                            'samantha', 'zira', 'google us english'
+                                        ];
+                                        var selectedVoice = englishVoices.find(v =>
+                                            preferredNames.some(name => v.name.toLowerCase().includes(name))
+                                        ) || englishVoices.find(v => v.lang.toLowerCase() === 'en-us') || englishVoices[0];
+                                        msg.voice = selectedVoice;
+                                        msg.lang = selectedVoice.lang;
+                                        started = true;
+                                        synth.removeEventListener('voiceschanged', speakWithSelectedVoice);
                                         window.speechSynthesis.speak(msg);
                                     }}
 
-                                    var voices = window.speechSynthesis.getVoices();
-                                    if (voices.length > 0) {{
-                                        speakWithSelectedVoice();
-                                    }} else {{
-                                        window.speechSynthesis.onvoiceschanged = speakWithSelectedVoice;
-                                    }}
+                                    synth.addEventListener('voiceschanged', speakWithSelectedVoice);
+                                    speakWithSelectedVoice();
                                 }}
                             </script>
                         """, height=0, width=0)
