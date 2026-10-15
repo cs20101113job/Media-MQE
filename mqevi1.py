@@ -3,9 +3,7 @@ import os
 import shutil
 import math
 import time
-import logging
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 import streamlit as st
@@ -17,13 +15,10 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfigurati
 from mediapipe.python._framework_bindings import resource_util
 from mediapipe.python.solutions import download_utils
 
-logger = logging.getLogger(__name__)
-
 # -----------------------------------------------------------------------------
 # 1. 頁面配置
 # -----------------------------------------------------------------------------
-APP_VERSION = 3
-st.set_page_config(page_title=f"Visual Inspection Distance V{APP_VERSION} (WebRTC版)", layout="wide")
+st.set_page_config(page_title="Visual Inspection Distance (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
 # 2. 修復 MediaPipe Cloud 唯讀權限問題
@@ -34,40 +29,22 @@ def setup_mediapipe_cloud():
     tmp_mp_dir = os.path.join(tmp_root, "mediapipe")
     target_file = os.path.join(tmp_mp_dir, "modules", "pose_landmark", "pose_landmark_lite.tflite")
 
-    for root, dirs, files in os.walk(mp_path):
-        rel_path = os.path.relpath(root, mp_path)
-        dest_dir = os.path.join(tmp_mp_dir, rel_path) if rel_path != "." else tmp_mp_dir
-        os.makedirs(dest_dir, exist_ok=True)
-        for file in files:
-            src_file = os.path.join(root, file)
-            dst_file = os.path.join(dest_dir, file)
-            if not os.path.lexists(dst_file):
-                try:
-                    os.symlink(src_file, dst_file)
-                except OSError:
-                    shutil.copy2(src_file, dst_file)
+    if not os.path.exists(target_file):
+        for root, dirs, files in os.walk(mp_path):
+            rel_path = os.path.relpath(root, mp_path)
+            dest_dir = os.path.join(tmp_mp_dir, rel_path) if rel_path != "." else tmp_mp_dir
+            os.makedirs(dest_dir, exist_ok=True)
+            for file in files:
+                src_file = os.path.join(root, file)
+                dst_file = os.path.join(dest_dir, file)
+                if not os.path.exists(dst_file):
+                    try:
+                        os.symlink(src_file, dst_file)
+                    except Exception:
+                        shutil.copy2(src_file, dst_file)
 
-    os.makedirs(os.path.dirname(target_file), exist_ok=True)
-    if not os.path.isfile(target_file) or os.path.getsize(target_file) == 0:
-        temporary_model = f"{target_file}.download"
         url = "https://storage.googleapis.com/mediapipe-assets/pose_landmark_lite.tflite"
-        try:
-            urllib.request.urlretrieve(url, temporary_model)
-            os.replace(temporary_model, target_file)
-        except Exception as exc:
-            if os.path.exists(temporary_model):
-                os.remove(temporary_model)
-            raise RuntimeError(f"Failed to download MediaPipe Pose model from {url}") from exc
-
-    if not getattr(resource_util, "_mqe_resource_dir_patched", False):
-        original_set_resource_dir = resource_util.set_resource_dir
-
-        def use_writable_resource_dir(_resource_dir):
-            original_set_resource_dir(tmp_root)
-
-        # SolutionBase resets the resource root to the read-only package directory.
-        resource_util.set_resource_dir = use_writable_resource_dir
-        resource_util._mqe_resource_dir_patched = True
+        urllib.request.urlretrieve(url, target_file)
 
     resource_util.set_resource_dir(tmp_root)
     download_utils.download_oss_model = lambda path: None
@@ -98,13 +75,13 @@ RTC_CONFIG = RTCConfiguration({
 # -----------------------------------------------------------------------------
 class PoseVideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self.pose = None
-        self._inference_executor = ThreadPoolExecutor(max_workers=1)
-        self._inference_future = None
-        self._latest_results = None
-        self.inference_error = None
-        self._next_inference_time = 0.0
-        self._executor_shutdown = False
+        self.pose = mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=0,
+            smooth_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
         self.use_3d_world = True
         self.calib_ratio = 0.85
         self.scale_factor = 0.15
@@ -115,79 +92,20 @@ class PoseVideoProcessor(VideoProcessorBase):
         self.status_str = "No detection human body"
         self.status_category = "NO_HUMAN"
 
-    def _run_inference(self, rgb_frame: np.ndarray):
-        if self.pose is None:
-            self.pose = mp_pose.Pose(
-                static_image_mode=False,
-                model_complexity=0,
-                smooth_landmarks=True,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5
-            )
-
-        try:
-            return self.pose.process(rgb_frame)
-        except Exception:
-            self.pose.close()
-            self.pose = None
-            raise
-
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        return self._process_frame(frame)
-
-    async def recv_queued(self, frames: list[av.VideoFrame]) -> list[av.VideoFrame]:
-        if not frames:
-            return []
-        return [self._process_frame(frames[-1])]
-
-    def _process_frame(self, frame: av.VideoFrame) -> av.VideoFrame:
-        if self._inference_future is not None and self._inference_future.done():
-            completed_future = self._inference_future
-            self._inference_future = None
-            try:
-                self._latest_results = completed_future.result()
-                self.inference_error = None
-            except Exception as exc:
-                self._latest_results = None
-                self.inference_error = f"{type(exc).__name__}: {exc}"
-                self._next_inference_time = time.monotonic() + 1.0
-                logger.exception("Pose inference failed; retrying with a new Pose instance")
-
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
-        if (
-            self._inference_future is None
-            and not self._executor_shutdown
-            and time.monotonic() >= self._next_inference_time
-        ):
-            inference_img = img
-            height, width = img.shape[:2]
-            scale = min(1.0, 480 / max(height, width))
-            if scale < 1.0:
-                inference_img = cv2.resize(
-                    img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA
-                )
-            rgb_frame = cv2.cvtColor(inference_img, cv2.COLOR_BGR2RGB)
-            self._inference_future = self._inference_executor.submit(
-                self._run_inference, rgb_frame
-            )
-
-        return self._render_frame(img, self._latest_results)
-
-    def _render_frame(self, img: np.ndarray, results) -> av.VideoFrame:
         h, w, _ = img.shape
+        
+        rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = self.pose.process(rgb_frame)
+
         status_str = "No detection human body"
         status_category = "NO_HUMAN"
         line_color = (200, 200, 200)
         current_dist_cm = 0.0
 
-        if self.inference_error:
-            status_str = f"Pose inference error; retrying ({self.inference_error})"
-            status_category = "INFERENCE_ERROR"
-            line_color = (0, 0, 255)
-            cv2.putText(img, "POSE INFERENCE ERROR - RETRYING", (30, 70),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, line_color, 2)
-        elif results is not None and results.pose_landmarks:
+        if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
 
             left_eye = landmarks[mp_pose.PoseLandmark.LEFT_EYE.value]
@@ -255,24 +173,10 @@ class PoseVideoProcessor(VideoProcessorBase):
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-    def on_ended(self):
-        if self._executor_shutdown:
-            return
-        self._executor_shutdown = True
-        try:
-            self._inference_executor.submit(self._close_pose).result()
-        finally:
-            self._inference_executor.shutdown(wait=True, cancel_futures=True)
-
-    def _close_pose(self):
-        if self.pose is not None:
-            self.pose.close()
-            self.pose = None
-
 # -----------------------------------------------------------------------------
 # 4. Streamlit UI 介面設定
 # -----------------------------------------------------------------------------
-st.title(f"📷 Visual Inspection Distance V{APP_VERSION} (WebRTC Version)")
+st.title("📷 Visual Inspection Distance (WebRTC Version)")
 st.caption("Standard Range: 30 ~ 32 cm")
 
 # Session State 初始化
@@ -297,9 +201,9 @@ with col1:
         video_processor_factory=PoseVideoProcessor,
         media_stream_constraints={
             "video": {
-                "width": {"ideal": 480, "max": 640},
-                "height": {"ideal": 360, "max": 480},
-                "frameRate": {"ideal": 15, "max": 20}
+                "width": {"ideal": 640},
+                "height": {"ideal": 480},
+                "frameRate": {"ideal": 30}
             },
             "audio": False
         },
@@ -329,63 +233,30 @@ with col2:
             🔊 Click here to enable voice prompt
         </button>
         <script>
-            var synth = 'speechSynthesis' in window ? window.speechSynthesis : null;
-            var btn = document.getElementById("speech-btn");
-            var selectedVoice = null;
-            var voiceTimeout;
-
-            function loadEnglishVoice() {
-                if (!synth || selectedVoice) return;
-
-                var englishVoices = synth.getVoices().filter(v =>
-                    v.lang && v.lang.toLowerCase().startsWith('en')
-                );
-                if (englishVoices.length === 0) return;
-
-                var preferredNames = [
-                    'natural', 'enhanced', 'premium', 'ava', 'jenny',
-                    'samantha', 'zira', 'google us english'
-                ];
-                selectedVoice = englishVoices.find(v =>
-                    preferredNames.some(name => v.name.toLowerCase().includes(name))
-                ) || englishVoices.find(v => v.lang.toLowerCase() === 'en-us') || englishVoices[0];
-
-                clearTimeout(voiceTimeout);
-                synth.removeEventListener('voiceschanged', loadEnglishVoice);
-                btn.disabled = false;
-                btn.innerText = "🔊 Click here to enable voice prompt";
-            }
-
             function initSpeech() {
-                if (!synth || !selectedVoice) return;
+                if ('speechSynthesis' in window) {
+                    window.speechSynthesis.cancel();
+                    var msg = new SpeechSynthesisUtterance("Enable Voice prompt function");
+                    msg.lang = "en-US";
+                    msg.pitch = 1.0; // 必須為 1.0，避免觸發 Chrome 音頻重採樣變聲失真
+                    msg.rate = 1.0;
 
-                synth.cancel();
-                var msg = new SpeechSynthesisUtterance("Voice prompt enabled.");
-                msg.voice = selectedVoice;
-                msg.lang = selectedVoice.lang;
-                msg.pitch = 1.0;
-                msg.rate = 1.0;
-                synth.speak(msg);
-                btn.style.backgroundColor = "#0d6efd";
-                btn.innerText = "✅ Voice prompt is ready";
-            }
+                    var voices = window.speechSynthesis.getVoices();
+                    var preferredVoice = voices.find(v => v.lang.startsWith('en') && (
+                        v.name.includes('Zira') || 
+                        v.name.includes('Jenny') || 
+                        v.name.includes('Google US English') ||
+                        v.name.includes('Samantha') || 
+                        v.name.includes('Natural')
+                    ));
+                    if (preferredVoice) msg.voice = preferredVoice;
 
-            if (synth) {
-                btn.disabled = true;
-                btn.innerText = "⌛ Loading English voice...";
-                synth.addEventListener('voiceschanged', loadEnglishVoice);
-                voiceTimeout = setTimeout(function() {
-                    if (selectedVoice) return;
-                    synth.removeEventListener('voiceschanged', loadEnglishVoice);
-                    btn.disabled = true;
-                    btn.style.backgroundColor = "#dc3545";
-                    btn.innerText = "❌ No English voice available";
-                }, 5000);
-                loadEnglishVoice();
-            } else {
-                btn.disabled = true;
-                btn.style.backgroundColor = "#dc3545";
-                btn.innerText = "❌ Speech synthesis is unavailable";
+                    window.speechSynthesis.speak(msg);
+                    
+                    var btn = document.getElementById("speech-btn");
+                    btn.style.backgroundColor = "#0d6efd";
+                    btn.innerText = "✅ Voice prompt is ready";
+                }
             }
         </script>
     """, height=55)
@@ -397,10 +268,6 @@ with col2:
             status_val = ctx.video_processor.status_str
             category_val = getattr(ctx.video_processor, "status_category", "NO_HUMAN")
             dist_val = ctx.video_processor.current_dist_cm
-            inference_error = getattr(ctx.video_processor, "inference_error", None)
-
-            if inference_error:
-                st.error(f"Pose detection failed; retrying: {inference_error}")
 
             # 卡片式佈局：自動換行防止文字被剪切截斷
             st.markdown(f"""
