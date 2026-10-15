@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # 1. 頁面配置
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="Visual Inspection Distance VI (WebRTC版)", layout="wide")
+st.set_page_config(page_title="Visual Inspection Distance V2 (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
 # 2. 修復 MediaPipe Cloud 唯讀權限問題
