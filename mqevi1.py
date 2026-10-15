@@ -79,13 +79,7 @@ RTC_CONFIG = RTCConfiguration({
 # -----------------------------------------------------------------------------
 class PoseVideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self.pose = mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=0,
-            smooth_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+        self._pose = None
         self.use_3d_world = True
         self.calib_ratio = 0.85
         self.scale_factor = 0.15
@@ -98,6 +92,22 @@ class PoseVideoProcessor(VideoProcessorBase):
         self._inference_executor = ThreadPoolExecutor(max_workers=1)
         self._inference_future = None
         self._latest_results = None
+
+    def _run_inference(self, rgb_frame: np.ndarray):
+        if self._pose is None:
+            self._pose = mp_pose.Pose(
+                static_image_mode=False,
+                model_complexity=0,
+                smooth_landmarks=True,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+        return self._pose.process(rgb_frame)
+
+    def _close_pose(self):
+        if self._pose is not None:
+            self._pose.close()
+            self._pose = None
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         return self._process_frame(frame)
@@ -123,7 +133,7 @@ class PoseVideoProcessor(VideoProcessorBase):
         if self._inference_future is None:
             rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             self._inference_future = self._inference_executor.submit(
-                self.pose.process, rgb_frame
+                self._run_inference, rgb_frame
             )
 
         return self._render_frame(img, self._latest_results)
@@ -205,8 +215,8 @@ class PoseVideoProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
     def on_ended(self):
+        self._inference_executor.submit(self._close_pose).result()
         self._inference_executor.shutdown(wait=True, cancel_futures=True)
-        self.pose.close()
 
 # -----------------------------------------------------------------------------
 # 4. Streamlit UI 介面設定
