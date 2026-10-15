@@ -18,7 +18,7 @@ from mediapipe.python.solutions import download_utils
 # -----------------------------------------------------------------------------
 # 1. 頁面配置
 # -----------------------------------------------------------------------------
-APP_VERSION = 1
+APP_VERSION = 2
 st.set_page_config(page_title=f"Visual Inspection Distance V{APP_VERSION} (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
@@ -76,13 +76,7 @@ RTC_CONFIG = RTCConfiguration({
 # -----------------------------------------------------------------------------
 class PoseVideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self.pose = mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=0,
-            smooth_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+        self.pose = None
         self.use_3d_world = True
         self.calib_ratio = 0.85
         self.scale_factor = 0.15
@@ -94,6 +88,15 @@ class PoseVideoProcessor(VideoProcessorBase):
         self.status_category = "NO_HUMAN"
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        if self.pose is None:
+            self.pose = mp_pose.Pose(
+                static_image_mode=False,
+                model_complexity=0,
+                smooth_landmarks=True,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
         h, w, _ = img.shape
@@ -174,6 +177,11 @@ class PoseVideoProcessor(VideoProcessorBase):
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
+    def on_ended(self):
+        if self.pose is not None:
+            self.pose.close()
+            self.pose = None
+
 # -----------------------------------------------------------------------------
 # 4. Streamlit UI 介面設定
 # -----------------------------------------------------------------------------
@@ -202,9 +210,9 @@ with col1:
         video_processor_factory=PoseVideoProcessor,
         media_stream_constraints={
             "video": {
-                "width": {"ideal": 640},
-                "height": {"ideal": 480},
-                "frameRate": {"ideal": 30}
+                "width": {"ideal": 480, "max": 640},
+                "height": {"ideal": 360, "max": 480},
+                "frameRate": {"ideal": 15, "max": 20}
             },
             "audio": False
         },
