@@ -3,7 +3,9 @@ import os
 import shutil
 import math
 import time
+import logging
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 import streamlit as st
@@ -15,10 +17,12 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfigurati
 from mediapipe.python._framework_bindings import resource_util
 from mediapipe.python.solutions import download_utils
 
+logger = logging.getLogger(__name__)
+
 # -----------------------------------------------------------------------------
 # 1. 頁面配置
 # -----------------------------------------------------------------------------
-APP_VERSION = 2
+APP_VERSION = 3
 st.set_page_config(page_title=f"Visual Inspection Distance V{APP_VERSION} (WebRTC版)", layout="wide")
 
 # -----------------------------------------------------------------------------
@@ -77,6 +81,11 @@ RTC_CONFIG = RTCConfiguration({
 class PoseVideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.pose = None
+        self._inference_executor = ThreadPoolExecutor(max_workers=1)
+        self._inference_future = None
+        self._latest_results = None
+        self.inference_error = None
+        self._executor_shutdown = False
         self.use_3d_world = True
         self.calib_ratio = 0.85
         self.scale_factor = 0.15
@@ -87,7 +96,7 @@ class PoseVideoProcessor(VideoProcessorBase):
         self.status_str = "No detection human body"
         self.status_category = "NO_HUMAN"
 
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+    def _run_inference(self, rgb_frame: np.ndarray):
         if self.pose is None:
             self.pose = mp_pose.Pose(
                 static_image_mode=False,
@@ -96,20 +105,52 @@ class PoseVideoProcessor(VideoProcessorBase):
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5
             )
+        return self.pose.process(rgb_frame)
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        return self._process_frame(frame)
+
+    async def recv_queued(self, frames: list[av.VideoFrame]) -> list[av.VideoFrame]:
+        if not frames:
+            return []
+        return [self._process_frame(frames[-1])]
+
+    def _process_frame(self, frame: av.VideoFrame) -> av.VideoFrame:
+        if self._inference_future is not None and self._inference_future.done():
+            completed_future = self._inference_future
+            self._inference_future = None
+            try:
+                self._latest_results = completed_future.result()
+                self.inference_error = None
+            except Exception as exc:
+                self._latest_results = None
+                self.inference_error = f"{type(exc).__name__}: {exc}"
+                logger.exception("Pose inference failed; retrying with the next frame")
 
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
-        h, w, _ = img.shape
-        
-        rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = self.pose.process(rgb_frame)
+        if self._inference_future is None:
+            rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            self._inference_future = self._inference_executor.submit(
+                self._run_inference, rgb_frame
+            )
 
+        return self._render_frame(img, self._latest_results)
+
+    def _render_frame(self, img: np.ndarray, results) -> av.VideoFrame:
+        h, w, _ = img.shape
         status_str = "No detection human body"
         status_category = "NO_HUMAN"
         line_color = (200, 200, 200)
         current_dist_cm = 0.0
 
-        if results.pose_landmarks:
+        if self.inference_error:
+            status_str = "Pose inference error (see server logs)"
+            status_category = "INFERENCE_ERROR"
+            line_color = (0, 0, 255)
+            cv2.putText(img, "POSE INFERENCE ERROR", (30, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, line_color, 2)
+        elif results is not None and results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
 
             left_eye = landmarks[mp_pose.PoseLandmark.LEFT_EYE.value]
@@ -178,6 +219,15 @@ class PoseVideoProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
     def on_ended(self):
+        if self._executor_shutdown:
+            return
+        self._executor_shutdown = True
+        try:
+            self._inference_executor.submit(self._close_pose).result()
+        finally:
+            self._inference_executor.shutdown(wait=True, cancel_futures=True)
+
+    def _close_pose(self):
         if self.pose is not None:
             self.pose.close()
             self.pose = None
@@ -310,6 +360,10 @@ with col2:
             status_val = ctx.video_processor.status_str
             category_val = getattr(ctx.video_processor, "status_category", "NO_HUMAN")
             dist_val = ctx.video_processor.current_dist_cm
+            inference_error = getattr(ctx.video_processor, "inference_error", None)
+
+            if inference_error:
+                st.error(f"Pose detection failed: {inference_error}")
 
             # 卡片式佈局：自動換行防止文字被剪切截斷
             st.markdown(f"""
