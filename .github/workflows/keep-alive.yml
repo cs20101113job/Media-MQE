@@ -1,0 +1,24 @@
+name: Streamlit Keep Alive
+
+on:
+  schedule:
+    # 每隔 6 小時執行一次 (UTC 時間)
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping-streamlit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send HTTP request to Streamlit App
+        run: |
+          # 發送請求並印出 HTTP 狀態碼
+          HTTP_STATUS=$(curl -s -o /dev/null -w ""%{http_code}"" https://viwebrtceng.streamlit.app/)
+          echo ""Response HTTP Status Code: $HTTP_STATUS""
+          
+          # 修改判斷邏輯，接受 200 或 303
+          if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 303 ]; then
+            echo "App is awake and healthy!"
+          else
+            echo "Warning: App returned status $HTTP_STATUS"
+          fi
