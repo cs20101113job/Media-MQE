@@ -12,7 +12,9 @@ jobs:
     steps:
       - name: Send HTTP request to Streamlit App
         run: |
-          HTTP_STATUS=$(curl -s -L -o /dev/null -w "%{http_code}" https://viwebrtceng.streamlit.app/)
+          # Do not follow redirects here; this app redirects to auth/login and can loop.
+          # A 303 response is still a valid health signal for the keep-alive check.
+          HTTP_STATUS=$(curl -sS --max-redirs 0 -o /dev/null -w "%{http_code}" https://viwebrtceng.streamlit.app/)
           echo "Response HTTP Status Code: $HTTP_STATUS"
 
           if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "303" ]; then
