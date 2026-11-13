@@ -1,9 +1,33 @@
+# name: Streamlit Keep Alive
+
+# on:
+#   schedule:
+#     # 每隔 6 小時執行一次 (UTC 時間)
+#     - cron: '0 */6 * * *'
+#   workflow_dispatch:
+
+# jobs:
+#   ping-streamlit:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Send HTTP request to Streamlit App
+#         run: |
+#           # 發送請求並印出 HTTP 狀態碼
+#           HTTP_STATUS=$(curl -s -o /dev/null -w ""%{http_code}"" https://viwebrtceng.streamlit.app/)
+#           echo ""Response HTTP Status Code: $HTTP_STATUS""
+          
+#           # 修改判斷邏輯，接受 200 或 303
+#           if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 303 ]; then
+#             echo "App is awake and healthy!"
+#           else
+#             echo "Warning: App returned status $HTTP_STATUS"
+#           fi
 name: Streamlit Keep Alive
 
 on:
   schedule:
-    # 每隔 6 小時執行一次 (UTC 時間)
-    - cron: '0 */6 * * *'
+    # 建議改為每小時執行一次，確保高頻率維持活躍
+    - cron: '0 * * * *
   workflow_dispatch:
 
 jobs:
@@ -12,12 +36,13 @@ jobs:
     steps:
       - name: Send HTTP request to Streamlit App
         run: |
-          # 發送請求並印出 HTTP 狀態碼
-          HTTP_STATUS=$(curl -s -o /dev/null -w ""%{http_code}"" https://viwebrtceng.streamlit.app/)
-          echo ""Response HTTP Status Code: $HTTP_STATUS""
-          
-          # 修改判斷邏輯，接受 200 或 303
+          # 加入 -L 參數自動跟隨重新導向，確保完整訪問應用程式
+          HTTP_STATUS=$(curl -s -L -o /dev/null -w "%{http_code}" https://viwebrtceng.streamlit.app/)
+          echo "Response HTTP Status Code: $HTTP_STATUS"
+
+          # 檢查 HTTP 狀態碼，接受 200 或 303
           if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 303 ]; then
+            else
             echo "App is awake and healthy!"
           else
             echo "Warning: App returned status $HTTP_STATUS"
