@@ -2,7 +2,6 @@ name: Streamlit Keep Alive
 
 on:
   schedule:
-    # Run once per hour to keep the app active.
     - cron: '0 * * * *'
   workflow_dispatch:
 
@@ -12,12 +11,11 @@ jobs:
     steps:
       - name: Send HTTP request to Streamlit App
         run: |
-          # Do not follow redirects here; this app redirects to auth/login and can loop.
-          # A 303 response is still a valid health signal for the keep-alive check.
-          HTTP_STATUS=$(curl -sS --max-redirs 0 -o /dev/null -w "%{http_code}" https://viwebrtceng.streamlit.app/)
+          HTTP_STATUS=$(curl -s -L -o /dev/null -w "%{http_code}" https://viwebrtceng.streamlit.app/)
           echo "Response HTTP Status Code: $HTTP_STATUS"
 
-          if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "303" ]; then
+          # 正確的 if-else 語法
+          if [ "$HTTP_STATUS" -eq 200 ] || [ "$HTTP_STATUS" -eq 303 ]; then
             echo "App is awake and healthy!"
           else
             echo "Warning: App returned status $HTTP_STATUS"
