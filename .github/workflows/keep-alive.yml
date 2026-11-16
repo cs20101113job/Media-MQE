@@ -12,13 +12,16 @@ jobs:
     steps:
       - name: Send HTTP request to Streamlit App
         run: |
-          # Do not follow redirects here; this app redirects to auth/login and can loop.
-          # A 303 response is still a valid health signal for the keep-alive check.
-          HTTP_STATUS=$(curl -sS --max-redirs 0 -o /dev/null -w "%{http_code}" https://viwebrtceng.streamlit.app/)
+          # A redirect to Streamlit authentication is not proof that the app is awake.
+          HTTP_STATUS=$(curl -sS --max-redirs 0 --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" https://viwebrtceng.streamlit.app/)
           echo "Response HTTP Status Code: $HTTP_STATUS"
 
-          if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "303" ]; then
-            echo "App is awake and healthy!"
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "App endpoint returned HTTP 200."
+          elif [ "$HTTP_STATUS" = "303" ]; then
+            echo "::error::Streamlit redirected this unauthenticated request. It did not wake or verify the app; wake it from the app page or configure an authenticated check."
+            exit 1
           else
-            echo "Warning: App returned status $HTTP_STATUS"
+            echo "::error::App endpoint returned HTTP $HTTP_STATUS."
+            exit 1
           fi
