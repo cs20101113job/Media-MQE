@@ -12,8 +12,8 @@ jobs:
     steps:
       - name: Send HTTP request to Streamlit App
         run: |
-          # A redirect to Streamlit authentication is not proof that the app is awake.
-          HTTP_STATUS=$(curl -sS --max-redirs 0 --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" https://viwebrtceng.streamlit.app/)
+          # The public embed URL serves anonymous requests without the root URL's sign-in redirect.
+          HTTP_STATUS=$(curl -sS --max-redirs 0 --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" "https://viwebrtceng.streamlit.app/?embed=true")
           echo "Response HTTP Status Code: $HTTP_STATUS"
 
           if [ "$HTTP_STATUS" = "200" ]; then
