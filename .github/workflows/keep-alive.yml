@@ -19,7 +19,7 @@ jobs:
           if [ "$HTTP_STATUS" = "200" ]; then
             echo "App endpoint returned HTTP 200."
           elif [ "$HTTP_STATUS" = "303" ]; then
-            echo "::error::Streamlit redirected this unauthenticated request. It did not wake or verify the app; wake it from the app page or configure an authenticated check."
+            echo "::error::Streamlit redirected this unauthenticated request to sign-in. Set the app to Public in Streamlit Community Cloud (App settings > Sharing) so this keep-alive check can verify it."
             exit 1
           else
             echo "::error::App endpoint returned HTTP $HTTP_STATUS."
